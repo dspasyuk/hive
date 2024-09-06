@@ -3,11 +3,11 @@
 Hive is a lightweight document database and vector search engine built with Node.js. It provides an efficient way to store, retrieve, and search documents using vector embeddings.
 Features
 
-    Document storage and retrieval
-    Vector-based similarity search
-    Automatic document processing and tokenization
-    Support for various file formats (txt, doc, docx, pdf)
-    In-memory and on-disk persistence
+Document storage and retrieval
+Vector-based similarity search
+Automatic document processing and tokenization
+Support for various file formats (txt, doc, docx, pdf)
+In-memory and on-disk persistence
 
 ### Installation 
 
