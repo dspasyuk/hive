@@ -1,4 +1,5 @@
-## Hive
+** Hive 
+
 Hive is a lightweight document database and vector search engine built with Node.js. It provides an efficient way to store, retrieve, and search documents using vector embeddings.
 Features
 
@@ -8,7 +9,7 @@ Features
     Support for various file formats (txt, doc, docx, pdf)
     In-memory and on-disk persistence
 
-Installation
+### Installation 
 
 bash
 npm install hive
@@ -18,11 +19,13 @@ Usage
 javascript
 const Hive = require('hive-db');
 
-// Initialize Hive
+### Initialize Hive 
+
 await Hive.init('MyDatabase', './mydb.json', './documents');
 
 
-API
+### API 
+
 Hive.init(dbName, filePath, pathToDocs)
 Initializes the Hive database.
 
