@@ -2,6 +2,11 @@ const fs = require("fs");
 const path = require("path");
 const reader = require("any-text");
 
+/**
+ * The Hive class is a database management system that provides a simple and efficient way to store and retrieve data.
+ * It uses a file-based storage system and supports various operations such as creating collections, inserting data, and querying the database.
+ * The class also includes functionality for loading and saving the database to disk, as well as integrating with natural language processing models for feature extraction.
+ */
 function Hive(){ }
 
   Hive.init = async function (dbName = "Documents", filePath, pathToDocs = false) {
