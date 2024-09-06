@@ -11,7 +11,6 @@ Features
 
 ### Installation 
 
-bash
 npm install hive
 
 Usage
