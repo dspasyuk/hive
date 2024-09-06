@@ -1,18 +1,16 @@
 const Hive  = require('./hive.js');
 
 async function test() {
-    await Hive.init('documents', './db/Documents/db.json');
-    // await db.initTransformers();
-    // db.loadToMemory();  
+    const pathToDocs = './docs';
+    await Hive.init('Documents', './db/Documents/db.json', pathToDocs);
+    //or 
+    // await Hive.init('Documents');
     const vector = await Hive.getVector("Human Factors Workscope", Hive.TransOptions);
     console.time("vector");
-    results = Hive.find('Documents', vector.data, 10);
+    results = await Hive.find('Documents', vector.data, 10);
     console.timeEnd("vector");
     // console.log(results);
-    results.forEach((r) => console.log(r.document.meta.href, r.similarity))
-    console.time("vector");
-    results = Hive.find('Documents', vector.data, 10);
-    console.timeEnd("vector");
+    results.forEach((r) => console.log(r.document.meta))
 }
 test()
 

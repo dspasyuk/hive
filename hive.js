@@ -4,21 +4,38 @@ const reader = require("any-text");
 
 function Hive(){ }
 
-  Hive.init = async function (dbName, filePath) {
+  Hive.init = async function (dbName = "Documents", filePath, pathToDocs = false) {
     Hive.dbName = dbName;
-    Hive.filePath = filePath || `./${dbName}.json`; // Default file path for saving/loading
+    Hive.filePath = filePath || `./${dbName}/${dbName}.json`; // Default file path for saving/loading
     Hive.collections = new Map();
+    Hive.createCollection(dbName);
     Hive.TransOptions = { pooling: "mean", normalize: false };
-    await Hive.initTransformers();
     Hive.loadToMemory(); // Load to memory automatically
+    await Hive.initTransformers();
+    if (pathToDocs && fs.existsSync(pathToDocs) && Hive.databaseExists()===false) {
+      await Hive.pullDocuments(pathToDocs);
+    }
+  }
+  Hive.databaseExists = function () {
+    if (fs.existsSync(Hive.filePath) && fs.statSync(Hive.filePath).size > 200) {
+      console.log(`Database exists ${Hive.filePath}`);
+      return true;
+    }else{
+      console.log(`Database does not exist ${Hive.filePath}`);
+      return false;
+    }
   }
 
   // Initialize transformers
-   Hive.initTransformers = async function (){
-    const transformersModule = await import("@xenova/transformers");
-    Hive.pipeline = transformersModule.pipeline;
-    // Define getVector as a function that takes text input and uses the pipeline
-    Hive.getVector = await Hive.transInit();
+  Hive.initTransformers = async function (){
+    if(!Hive.pipeline){
+      const transformersModule = await import("@xenova/transformers");
+      Hive.pipeline = transformersModule.pipeline;
+      // Define getVector as a function that takes text input and uses the pipeline
+      Hive.getVector = await Hive.transInit();
+    }else{
+      console.log(`Transformers already initialized`);
+    }
   }
 
   Hive.transInit = async function (){
@@ -26,49 +43,48 @@ function Hive(){ }
   }
 
   // Create a collection
-  Hive.createCollection = function (collectionName) {
-    if (!Hive.collections.has(collectionName)) {
-      Hive.collections.set(collectionName, []);
-      console.log(`Collection ${collectionName} created.`);
+  Hive.createCollection = function (dbName) {
+    if (!Hive.collections.has(dbName)) {
+      Hive.collections.set(dbName, []);
+      console.log(`Collection ${dbName} created.`);
     } else {
-      console.log(`Collection ${collectionName} already exists.`);
+      console.log(`Collection ${dbName} already exists.`);
     }
   }
 
   // Insert one object into a specific collection
-  Hive.insertOne = function (collectionName, entry) {
-    if (Hive.collections.has(collectionName)) {
-      console.log(`Inserting into collection: ${collectionName}`);
+  Hive.insertOne = function (dbName, entry) {
+    if (Hive.collections.has(dbName)) {
+      console.log(`Inserting into collection: ${dbName}`);
       const { vector, meta } = entry;
-      Hive.collections.get(collectionName).push({
+      Hive.collections.get(dbName).push({
         vector: vector,
         meta,
       });
     } else {
-      console.log(`Collection ${collectionName} does not exist.`);
+      console.log(`Collection ${dbName} does not exist.`);
     }
   }
   // Insert many entries into a collection
-  Hive.insertMany = function (collectionName, entries) {
-    if (Hive.collections.has(collectionName)) {
-      const collection = Hive.collections.get(collectionName);
+  Hive.insertMany = function (dbName, entries) {
+    if (Hive.collections.has(dbName)) {
+      const collection = Hive.collections.get(dbName);
       for (let i = 0; i < entries.length; i++) {
         const { vector, meta } = entries[i];
         collection.push({
-          vector: new Float32Array(vector),
+          vector: vector,
           meta,
         });
       }
       Hive.saveToDisk(); // Auto-save after bulk insertion
     } else {
-      console.log(`Collection ${collectionName} does not exist.`);
+      console.log(`Collection ${dbName} does not exist.`);
     }
   }
 
   // Save the database to disk
   Hive.saveToDisk= function () {
     const data = {};
-
     Hive.collections.forEach((value, key) => {
       data[key] = value.map((entry) => ({
         vector: entry.vector, // Convert Float32Array back to Array for JSON
@@ -81,72 +97,51 @@ function Hive(){ }
   }
 
   // Load the database into memory from disk
-  Hive.loadToMemory= function (){
+  Hive.loadToMemory= async function (){
     if (fs.existsSync(Hive.filePath)) {
       const rawData = fs.readFileSync(Hive.filePath, "utf8");
       const data = JSON.parse(rawData);
-
       Hive.collections.clear(); // Clear existing collections
-
-      for (const [collectionName, entries] of Object.entries(data)) {
-        Hive.createCollection(collectionName); // Recreate collections
+      for (const [dbName, entries] of Object.entries(data)) {
+        Hive.createCollection(dbName); // Recreate collections
         entries.forEach((entry) => {
-          Hive.collections.get(collectionName).push({
+          Hive.collections.get(dbName).push({
             vector: new Float32Array(entry.vector),
             meta: entry.meta,
           });
         });
       }
-
       console.log(`Database loaded into memory from ${Hive.filePath}`);
     } else {
       console.log(`File ${Hive.filePath} does not exist.`);
     }
   }
 
-  // Find vectors similar to the query vector
-  // Normalize a vector
-  
 
-  // Find vectors similar to the query vector
-  Hive.meanPooling = function (vector, targetLength) {
-    const pooledVector = [];
-    const poolSize = Math.ceil(vector.length / targetLength);
-    for (let i = 0; i < targetLength; i++) {
-      const start = i * poolSize;
-      const end = Math.min(start + poolSize, vector.length);
-      const sum = vector.slice(start, end).reduce((a, b) => a + b, 0);
-      pooledVector.push(sum / (end - start));
-    }
-    return pooledVector;
-  }
-  
-  Hive.find = function (collectionName, queryVector, topK = 5) {
+  // Find vectors similar to the query vector  
+  Hive.find = async function (dbName, queryVector, topK = 5) {
+    const queryVectorMag = Hive.normalize(queryVector);
     const results = [];
-    if (Hive.collections.has(collectionName)) {
-      const collection = Hive.collections.get(collectionName);
-  
+    if (Hive.collections.has(dbName)) {
+      const collection = Hive.collections.get(dbName);
       for (const item of collection) {
         const itemVector = item.vector;
-        const itemLength = itemVector.length;
        // console.log("pooled", queryVector.length, "item",itemVector.length);
-        const similarity = Hive.cosineSimilarity(queryVector, itemVector);
+        const similarity = Hive.cosineSimilarity(queryVector, itemVector, queryVectorMag);
         results.push({ document: item, similarity });
       }
     //   results[0].document.meta
       results.sort((a, b) => b.similarity - a.similarity); // Sort by similarity descending
-     
     } else {
-      console.error(`Collection ${collectionName} does not exist.`);
+      console.error(`Collection ${dbName} does not exist.`);
     }
     return results.slice(0, topK); // Return top K results
   }
   
-  Hive.cosineSimilarity = function (vector1, vector2) {
-    const dotProduct = vector1.reduce((sum, val, i) => sum + val * vector2[i], 0);
-    const magnitudeA = Hive.normalize(vector1);
-    const magnitudeB = Hive.normalize(vector2);
-    return dotProduct / (magnitudeA * magnitudeB);
+  Hive.cosineSimilarity = function (queryVector, itemVector, queryVectorMag) {
+    const dotProduct = queryVector.reduce((sum, val, i) => sum + val * itemVector[i], 0);
+    const itemVectorMag = Hive.normalize(itemVector);
+    return dotProduct / (queryVectorMag * itemVectorMag);
   }
   
   Hive.normalize = function (vector) {
@@ -157,41 +152,11 @@ function Hive(){ }
     return Math.sqrt(sum);
   }
   
-
   Hive.rank = function (queryVector, results) {
     return results.sort((a, b) => b.distance - a.distance); // Higher similarity (closer to 1) is better
   }
-// rank(queryVector, results) {
-//     const tfidfScores = results.map((result) => {
-//       const tf = calculateTermFrequency(result.document.meta.content, queryVector);
-//       const idf = calculateInverseDocumentFrequency(queryVector, results);
-//       return tf * idf;
-//     });
-  
-//     return results.sort((a, b) => tfidfScores[results.indexOf(b)] - tfidfScores[results.indexOf(a)]);
-//   }
-  
-//   calculateTermFrequency(text, query) {
-//     const terms = text.split(" ");
-//     const queryTerms = query;
-//     const tf = queryTerms.reduce((acc, term) => {
-//       const frequency = terms.filter((t) => t === term).length;
-//       return acc + frequency;
-//     }, 0);
-//     return tf / terms.length;
-//   }
-  
-//   calculateInverseDocumentFrequency(query, results) {
-//     const numDocuments = results.length;
-//     const numDocumentsWithTerm = results.filter((result) => {
-//       return result.document.meta.content.includes(query);
-//     }).length;
-//     return Math.log(numDocuments / numDocumentsWithTerm);
-//   }
 
-
-
-Hive.tokenCount = function (text) {
+  Hive.tokenCount = function (text) {
     const tokens = text.match(/\b\w+\b/g) || [];
     const tokensarr = tokens.filter((token) => /\S/.test(token));
     // console.log(tokensarr, tokensarr.length);
@@ -231,12 +196,11 @@ Hive.tokenCount = function (text) {
           endIndex--;
         }
       }
-
       if (endIndex === startIndex) {
         endIndex = Math.min(startIndex + sliceSize, len);
       }
       const slice = tokens.slice(startIndex, endIndex);
-      await Hive.addItem(slice.join(" "), path.relative(dir, filePath));
+      await Hive.addItem(slice.join(" "), filePath);
       startIndex = endIndex + 1;
     }
   }
@@ -250,7 +214,6 @@ Hive.tokenCount = function (text) {
   // Pull documents recursively from a directory and process them
   Hive.pullDocuments = async function (dir) {
     const files = await fs.promises.readdir(dir, { withFileTypes: true });
-
     for (const file of files) {
       const fullPath = path.join(dir, file.name);
       if (file.isDirectory()) {
