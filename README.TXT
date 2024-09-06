@@ -1,4 +1,4 @@
-** Hive 
+# Hive 
 
 Hive is a lightweight document database and vector search engine built with Node.js. It provides an efficient way to store, retrieve, and search documents using vector embeddings.
 Features
