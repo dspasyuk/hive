@@ -11,9 +11,9 @@ function Hive(){ }
 
   Hive.init = async function (dbName = "Documents", filePath, pathToDocs = false) {
     Hive.dbName = dbName;
-    Hive.filePath = filePath || `./${dbName}/${dbName}.json`; // Default file path for saving/loading
+    Hive.filePath = filePath || `./${Hive.dbName}/${Hive.dbName}.json`; // Default file path for saving/loading
     Hive.collections = new Map();
-    Hive.createCollection(dbName);
+    Hive.createCollection(Hive.dbName);
     Hive.TransOptions = { pooling: "mean", normalize: false };
     Hive.loadToMemory(); // Load to memory automatically
     await Hive.initTransformers();
@@ -48,32 +48,32 @@ function Hive(){ }
   }
 
   // Create a collection
-  Hive.createCollection = function (dbName) {
-    if (!Hive.collections.has(dbName)) {
-      Hive.collections.set(dbName, []);
-      console.log(`Collection ${dbName} created.`);
+  Hive.createCollection = function () {
+    if (!Hive.collections.has(Hive.dbName)) {
+      Hive.collections.set(Hive.dbName, []);
+      console.log(`Collection ${Hive.dbName} created in memory.`);
     } else {
-      console.log(`Collection ${dbName} already exists.`);
+      console.log(`Collection ${Hive.dbName} already exists.`);
     }
   }
 
   // Insert one object into a specific collection
-  Hive.insertOne = function (dbName, entry) {
-    if (Hive.collections.has(dbName)) {
-      console.log(`Inserting into collection: ${dbName}`);
+  Hive.insertOne = function (entry) {
+    if (Hive.collections.has(Hive.dbName)) {
       const { vector, meta } = entry;
-      Hive.collections.get(dbName).push({
+      Hive.collections.get(Hive.dbName).push({
         vector: vector,
         meta,
       });
+      console.log(Hive.collections.get(Hive.dbName));
     } else {
-      console.log(`Collection ${dbName} does not exist.`);
+      console.log(`Collection ${Hive.dbName} does not exist.`);
     }
   }
   // Insert many entries into a collection
-  Hive.insertMany = function (dbName, entries) {
-    if (Hive.collections.has(dbName)) {
-      const collection = Hive.collections.get(dbName);
+  Hive.insertMany = function (entries) {
+    if (Hive.collections.has(Hive.dbName)) {
+      const collection = Hive.collections.get(Hive.dbName);
       for (let i = 0; i < entries.length; i++) {
         const { vector, meta } = entries[i];
         collection.push({
@@ -83,9 +83,17 @@ function Hive(){ }
       }
       Hive.saveToDisk(); // Auto-save after bulk insertion
     } else {
-      console.log(`Collection ${dbName} does not exist.`);
+      console.log(`Collection ${Hive.dbName} does not exist.`);
     }
   }
+
+
+  Hive.ensureDirectoryExists = function(filePath) {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  };
 
   // Save the database to disk
   Hive.saveToDisk= function () {
@@ -96,7 +104,7 @@ function Hive(){ }
         meta: entry.meta,
       }));
     });
-
+    Hive.ensureDirectoryExists(Hive.filePath);
     fs.writeFileSync(Hive.filePath, JSON.stringify(data), "utf8");
     console.log(`Database saved to ${Hive.filePath}`);
   }
@@ -124,11 +132,11 @@ function Hive(){ }
 
 
   // Find vectors similar to the query vector  
-  Hive.find = async function (dbName, queryVector, topK = 5) {
+  Hive.find = async function (queryVector, topK = 5) {
     const queryVectorMag = Hive.normalize(queryVector);
     const results = [];
-    if (Hive.collections.has(dbName)) {
-      const collection = Hive.collections.get(dbName);
+    if (Hive.collections.has(Hive.dbName)) {
+      const collection = Hive.collections.get(Hive.dbName);
       for (const item of collection) {
         const itemVector = item.vector;
        // console.log("pooled", queryVector.length, "item",itemVector.length);
@@ -138,7 +146,7 @@ function Hive(){ }
     //   results[0].document.meta
       results.sort((a, b) => b.similarity - a.similarity); // Sort by similarity descending
     } else {
-      console.error(`Collection ${dbName} does not exist.`);
+      console.error(`Collection ${Hive.dbName} does not exist.`);
     }
     return results.slice(0, topK); // Return top K results
   }
@@ -157,9 +165,7 @@ function Hive(){ }
     return Math.sqrt(sum);
   }
   
-  Hive.rank = function (queryVector, results) {
-    return results.sort((a, b) => b.distance - a.distance); // Higher similarity (closer to 1) is better
-  }
+
 
   Hive.tokenCount = function (text) {
     const tokens = text.match(/\b\w+\b/g) || [];
@@ -172,7 +178,7 @@ function Hive(){ }
     try {
       const vector = await Hive.getVector(text, Hive.TransOptions);
       // Insert the item into the "Documents" collection
-      Hive.insertOne("Documents", {
+      Hive.insertOne( {
         vector: Array.from(vector.data),
         meta: {
           content: Hive.escapeChars(text),
@@ -180,6 +186,7 @@ function Hive(){ }
           title: Hive.escapeChars(text.slice(0, 20)),
         },
       });
+ 
     } catch (error) {
       console.error("Error adding item:", error);
     }
