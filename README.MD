@@ -1,4 +1,4 @@
-# Hive 
+# Hive (Work in progress)
 
 ![Hive](./img/hive.png)
 
@@ -8,7 +8,7 @@ Features
 Document storage and retrieval
 Vector-based similarity search
 Automatic document processing and tokenization
-Support for various file formats (txt, doc, docx, pdf)
+Support for various file formats (txt, doc, docx, pdf) (any-text)
 In-memory and on-disk persistence
 
 ### Installation 
