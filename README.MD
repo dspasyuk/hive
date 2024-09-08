@@ -18,6 +18,7 @@ npm install hive
 Usage
 
 javascript
+
 const Hive = require('hive-db');
 
 ### Initialize Hive 
