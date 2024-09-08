@@ -2,7 +2,6 @@ import { pipeline } from "@xenova/transformers";
 import fs from "fs";
 import path from "path";
 import reader from "any-text";
-import { Worker } from "worker_threads";
 import { fileURLToPath } from "url";
 
 /**
