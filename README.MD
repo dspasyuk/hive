@@ -51,7 +51,7 @@ Hive.insertOne({vector: Array,  meta: {}});
 The database was optimized to handle well above 1,000,000 entries (512 tokens) large.
 On Average it takes around 30 ms to search a database with 30,000 entries (AMD Ryzen 7 3700X 8-Core Processor)
 
-Hive Database Class
+### Hive Database Class
 
 Hive.insertOne(entry)
 
