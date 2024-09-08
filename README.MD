@@ -19,12 +19,13 @@ npm install hive
 Usage 
 
     import Hive from 'hive';  
-    await Hive.init('Documents', './db/Documents/db.json',"./docs");
-
+    await Hive.init(dbName, filePath,pathToDocs);
 
     dbName: Name of the database (default: "Documents") 
     filePath: Path to save/load the database file 
     pathToDocs: Optional path to directory containing documents to process 
+
+     await Hive.init('Documents', './db/Documents/db.json',"./docs");
 
 
 First the Hive will take all your text files from ./docs folder, split it in to chunks (512 tokens), 
