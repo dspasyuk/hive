@@ -44,6 +44,7 @@ By default Hive user transformers.js (Xenova/all-MiniLM-L6-v2) to create vector 
 
 ` 
 Hive.insertOne({vector: Array,  meta: {}});
-`
+`  
+
 License MIT
 This project is licensed under the MIT License.
