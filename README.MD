@@ -45,6 +45,11 @@ By default Hive user transformers.js (Xenova/all-MiniLM-L6-v2) to create vector 
 ` 
 Hive.insertOne({vector: Array,  meta: {}});
 `  
+### Speed
+
+The database was optimized to handle well above 1,000,000 entries (512 tokens) large.
+On Average it takes around 30 ms to search a database with 30,000 entries (AMD Ryzen 7 3700X 8-Core Processor)
+
 
 License MIT
 This project is licensed under the MIT License.
