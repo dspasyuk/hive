@@ -19,7 +19,7 @@ npm install hive
 Usage 
 
     import Hive from 'hive';  
-    await Hive.init(dbName, filePath,pathToDocs);
+    await Hive.init(dbName, filePath, pathToDocs);
 
     dbName: Name of the database (default: "Documents") 
     filePath: Path to save/load the database file 
