@@ -18,7 +18,8 @@ npm install hive
 Usage 
 
 
-`import Hive from 'hive';` 
+`import Hive from 'hive';`  
+
 `await Hive.init('Documents', './db/Documents/db.json',"./docs");`  
 
 
