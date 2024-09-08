@@ -33,8 +33,7 @@ convert them to chunks and create vector database in './db/Documents/db.json'
 
 Once database is created you can do a vector search using the following: 
 
-`
-const vector = await Hive.getVector("Human Factors Workscope", Hive.TransOptions); 
+`const vector = await Hive.getVector("Human Factors Workscope", Hive.TransOptions); 
 const results = await Hive.find(vector.data, 10); // 10 is topK, number of searches to return  
 console.log(results);
 `
