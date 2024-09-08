@@ -16,32 +16,32 @@ In-memory and on-disk persistence
 npm install hive
 
 Usage
-
-javascript
-
+`
 import Hive from 'hive';
-
-### Initialize Hive 
-
-await Hive.init('MyDatabase', './mydb.json', './documents');
-
-
-### API 
-
-Hive.init(dbName, filePath, pathToDocs)
-Initializes the Hive database.
+await Hive.init('Documents', './db/Documents/db.json',"./docs");
+`
 
     dbName: Name of the database (default: "Documents")
     filePath: Path to save/load the database file
     pathToDocs: Optional path to directory containing documents to process
 
-Hive.addItem(text, filePath)
-Adds a single item to the database.
-Hive.find(dbName, queryVector, topK)
-Finds similar vectors in the specified collection.
-Hive.pullDocuments(dir)
-Recursively processes and adds documents from a directory.
-Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
-License
+
+First the Hive will take all your text files from ./docs folder, split it in to chunks (512 tokens), 
+convert them to chunks and create vector database from them in './db/Documents/db.json'  
+
+Once database is created you can do a vector search using the following:
+
+`
+const vector = await Hive.getVector("Human Factors Workscope", Hive.TransOptions);
+const results = await Hive.find(vector.data, 10); // 10 is topK, number of searches to return 
+console.log(results);
+`
+
+### Alternative aproach to create the database
+
+By default Hive user transformers.js to create vector embeddings for your data and query but you can easily bypass that using inserOne function 
+` 
+Hive.insertOne({vector: Array,  meta: {}});
+`
+License MIT
 This project is licensed under the MIT License.
