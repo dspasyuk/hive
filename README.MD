@@ -30,7 +30,7 @@ Usage
 
 
 First the Hive will take all your text files from ./docs folder, split it in to chunks (512 tokens), 
-convert them to chunks and create vector database in './db/Documents/db.json'  
+convert them  vectors and create vector database in './db/Documents/db.json'  
 
 Once database is created you can do a vector search using the following: 
 
