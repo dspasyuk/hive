@@ -19,7 +19,7 @@ Usage
 
 javascript
 
-const Hive = require('hive-db');
+import Hive from 'hive';
 
 ### Initialize Hive 
 
