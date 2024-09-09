@@ -23,8 +23,8 @@ await Hive.init(dbName, filePath, pathToDocs);
 ```
 
 dbName: Name of the database (default: "Documents") 
-filePath: Path to save/load the database file 
-pathToDocs: Optional path to directory containing documents to process 
+filePath: Path to save/load the database file  
+pathToDocs: Optional path to directory containing documents to process   
 ```
 await Hive.init('Documents', './db/Documents/db.json',"./docs");
 ```
