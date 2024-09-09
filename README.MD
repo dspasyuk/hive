@@ -13,19 +13,22 @@ Support for various file formats (txt, doc, docx, pdf) (any-text)
 In-memory and on-disk persistence  
 
 ### Installation 
-
+```
 npm install deonis/hive 
+```
 
-Usage 
-
+### Usage 
+    ```
     import Hive from 'hive';  
     await Hive.init(dbName, filePath, pathToDocs);
+   ```
 
     dbName: Name of the database (default: "Documents") 
     filePath: Path to save/load the database file 
     pathToDocs: Optional path to directory containing documents to process 
-
+    ```
     await Hive.init('Documents', './db/Documents/db.json',"./docs");
+    ```
 
 
 First the Hive will take all your text files from ./docs folder, split it in to chunks (512 tokens), 
@@ -33,19 +36,19 @@ convert them  vectors and create vector database in './db/Documents/db.json'
 
 Once database is created you can do a vector search using the following: 
 
-`const vector = await Hive.getVector("Hello World", Hive.TransOptions); 
+```const vector = await Hive.getVector("Hello World", Hive.TransOptions); 
 
 const results = await Hive.find(vector.data, 10); // 10 is topK, number of searches to return  
 console.log(results);
-`
+```
 
 ### Alternative aproach to create the database
 
 By default Hive user transformers.js (Xenova/all-MiniLM-L6-v2) to create vector embeddings for your data and query but you can easily bypass that using inserOne function 
 
-` 
+```
 Hive.insertOne({vector: Array,  meta: {}});
-`  
+```
 ### Speed
 
 The database was optimized to handle well above 1,000,000 entries (512 tokens) large.
@@ -53,35 +56,38 @@ On Average it takes around 30 ms to search a database with 30,000 entries (AMD R
 
 ### Hive Database Class
 
-Hive.insertOne(entry)
+```Hive.insertOne(entry)```
 
     entry: An object containing the vector and metadata for the document.
 
 Inserts a single entry into the collection. The entry includes the vector (features extracted from text) and associated metadata.
 
 
-Hive.insertMany(entries)
+```Hive.insertMany(entries)```
 
     entries: An array of objects, where each object contains a vector and meta.
 
 Inserts multiple entries into the collection at once. Automatically saves the database to disk after bulk insertion.
-Save & Load
 
-Hive.saveToDisk()
+### Query Data
 
-Saves the current state of the database to a file on disk, ensuring the data persists across sessions.
-
-Hive.loadToMemory()
-
-Loads the database from disk into memory. It parses the data and restores the collection with the precomputed vectors and metadata.
-Query Data
-
-Hive.find(queryVector, topK = 5)
+```Hive.find(queryVector, topK = 5)```
 
     queryVector: The vector to compare against.
     topK: Number of top similar results to return (default: 5).
 
 Finds the top K vectors similar to the queryVector based on cosine similarity. Returns the most similar documents from the collection.
+
+### Save & Load
+
+```Hive.saveToDisk()```
+
+Saves the current state of the database to a file on disk, ensuring the data persists across sessions.
+
+```Hive.loadToMemory()```
+
+Loads the database from disk into memory. It parses the data and restores the collection with the precomputed vectors and metadata.
+
 Transformers Integration
 
 Hive.initTransformers()
