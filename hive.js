@@ -59,6 +59,10 @@ Hive.createCollection = function () {
   }
 };
 
+Hive.randomId = function () {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+};
+
 // Insert one object into a specific collection
 Hive.insertOne = function (entry) {
   if (Hive.collections.has(Hive.dbName)) {
@@ -68,6 +72,7 @@ Hive.insertOne = function (entry) {
       vector,
       magnitude, // Precompute and store the magnitude
       meta,
+      id:Hive.randomId()
     });
   }
 };
@@ -82,6 +87,7 @@ Hive.insertMany = function (entries) {
         vector: vector,
         meta,
         magnitude: Hive.normalize(vector),
+        id:Hive.randomId()
       });
     }
     Hive.saveToDisk(); // Auto-save after bulk insertion
@@ -111,6 +117,7 @@ Hive.saveToDisk = function () {
         vector: Array.from(entry.vector), // Convert Float32Array back to Array for JSON
         meta: entry.meta,
         magnitude: entry.magnitude,
+        id:entry.id
       });
     }
   }
@@ -130,6 +137,7 @@ Hive.loadToMemory = async function () {
     for (const [dbName, entries] of Object.entries(data)) {
       Hive.createCollection(dbName); // Recreate collections
       const collection = Hive.collections.get(dbName);
+     
       console.log("Number of Entries", entries.length);
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
@@ -137,6 +145,7 @@ Hive.loadToMemory = async function () {
           vector: new Float32Array(entry.vector),
           meta: entry.meta,
           magnitude: entry.magnitude,
+          id:entry.id
         });
       }
     }
@@ -201,7 +210,7 @@ Hive.addItem = async function (text, filePath = "") {
       vector: Array.from(vector.data),
       meta: {
         content: Hive.escapeChars(text),
-        href: Hive.escapeChars(filePath),
+        href: filePath,
         title: Hive.escapeChars(text.slice(0, 20)),
       },
     });
