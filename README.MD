@@ -14,7 +14,7 @@ In-memory and on-disk persistence
 
 ### Installation 
 
-npm install hive 
+npm install deonis/hive 
 
 Usage 
 
