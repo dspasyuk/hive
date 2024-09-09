@@ -41,7 +41,7 @@ const results = await Hive.find(vector.data, 10); // 10 is topK, number of searc
 console.log(results);
 ```
 
-### Alternative aproach to create the database
+### Alternative aproach of creating a database
 
 By default Hive user transformers.js (Xenova/all-MiniLM-L6-v2) to create vector embeddings for your data and query but you can easily bypass that using inserOne function 
 
