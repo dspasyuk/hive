@@ -18,10 +18,8 @@ npm install deonis/hive
 ```
 
 ### Usage 
-    ```
-    import Hive from 'hive';  
-    await Hive.init(dbName, filePath, pathToDocs);
-   ```
+    ```import Hive from 'hive';  
+    await Hive.init(dbName, filePath, pathToDocs);```
 
     dbName: Name of the database (default: "Documents") 
     filePath: Path to save/load the database file 
