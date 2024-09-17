@@ -29,7 +29,7 @@ filePath: Path to save/load the database file
 pathToDocs: Optional path to directory containing documents to process 
 
 ```
-await Hive.init('Documents', './db/Documents/db.json',"./docs");
+await Hive.init('Documents', './db/Documents/db.json', "./docs");
 ```
 
 
@@ -39,10 +39,18 @@ convert them  vectors and create vector database in './db/Documents/db.json'
 Once database is created you can do a vector search using the following: 
 
 ```
-const vector = await Hive.getVector("Hello World", Hive.TransOptions); 
+const vector = await Hive.getVector("Hello World", Hive.TransOptions); // uses transformer.js to generate a vector
 const results = await Hive.find(vector.data, 10); // 10 is topK, number of searches to return  
 console.log(results);
 ```
+
+### Options 
+  Befor changing default options initialize the database: await Hive.init('Documents', './db/Documents/db.json', "./docs");
+  Hive.sliceSize = 512; //default
+  Hive.models = {text: "Xenova/all-MiniLM-L6-v2", image:"Xenova/clip-vit-base-patch16"};  //default
+  Hive.documents = {text: [".txt", ".doc", ".docx", ".pdf"], image:[".png", ".jpg", ".jpeg"]};  //default
+  Hive.transformersOptions = { pooling: "mean", normalize: false };  //default
+  Hive.escapeRules={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","\\":"\\\\","/":"\\/"}; //default
 
 ### Alternative aproach of creating a database
 
