@@ -44,13 +44,32 @@ const results = await Hive.find(vector.data, 10); // 10 is topK, number of searc
 console.log(results);
 ```
 
-### Options 
-  Before changing default options initialize the database: await Hive.init('Documents', './db/Documents/db.json', "./docs");  
-  Hive.sliceSize = 512; //default  
-  Hive.models = {text: "Xenova/all-MiniLM-L6-v2", image:"Xenova/clip-vit-base-patch16"};  //default  
-  Hive.documents = {text: [".txt", ".doc", ".docx", ".pdf"], image:[".png", ".jpg", ".jpeg"]};  //default  
-  Hive.transformersOptions = { pooling: "mean", normalize: false };  //default  
-  Hive.escapeRules={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","\\":"\\\\","/":"\\/"}; //default  
+### Options Description
+
+    Hive.sliceSize (number): Defines the size of text slices for large documents during vector generation. The default value is 512.  
+
+    Hive.models (object): Specifies the models used for generating embeddings.  
+        text (string): The model for text embeddings, e.g., "Xenova/all-MiniLM-L6-v2".  
+        image (string): The model for image embeddings, e.g., "Xenova/clip-vit-base-patch16".  
+
+    Hive.documents (object): Defines the types of documents that can be processed for embeddings.  
+        text (array): List of supported text file extensions, e.g., [".txt", ".doc", ".docx", ".pdf"].  
+        image (array): List of supported image file extensions, e.g., [".png", ".jpg", ".jpeg"].  
+
+    Hive.transformersOptions (object): Configures options for transformers.  
+        pooling (string): Specifies the pooling method, e.g., "mean".  
+        normalize (boolean): Determines if vectors should be normalized. Default is false.  
+
+    Hive.escapeRules (object): Defines escape sequences for special characters during text parsing.  
+        &: &amp;  
+        <: &lt;  
+        >: &gt;  
+        ": &quot;  
+        ': &#39;  
+        \: \\  
+        /: \/  
+
+These options allow you to customize how Hive processes and stores text and image embeddings. Adjust these settings based on your specific requirements and the types of documents you plan to work with.
 
 ### Alternative aproach of creating a database
 
