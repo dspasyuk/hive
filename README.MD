@@ -93,7 +93,17 @@ On Average it takes around 30 ms to search a database with 30,000 entries (AMD R
 
 ```Hive.insertOne(entry)```
 
-    entry: An object containing the vector and metadata for the document.
+    entry: An object containing the vector and metadata for the document. {vector:[], meta:{}}
+
+Inserts a single entry into the collection. The entry includes the vector (features extracted from text) and associated metadata.
+
+
+### Update Data
+
+```Hive.updateOne(query, entry)```
+
+    entry: An object containing the vector and metadata for the document. {vector:[], meta:{}}
+    query: An object containing filePath {filePath:"/path/to/doc.txt"}
 
 Inserts a single entry into the collection. The entry includes the vector (features extracted from text) and associated metadata.
 
