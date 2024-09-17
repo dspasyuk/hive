@@ -45,6 +45,11 @@ console.log(results);
 ```
 
 ### Options Description
+      Hive.sliceSize = 512;  
+      Hive.models = {text: "Xenova/all-MiniLM-L6-v2", image:"Xenova/clip-vit-base-patch16"};  
+      Hive.documents = {text: [".txt", ".doc", ".docx", ".pdf"], image:[".png", ".jpg", ".jpeg"]};  
+      Hive.transformersOptions = { pooling: "mean", normalize: false };  
+      Hive.escapeRules={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","\\":"\\\\","/":"\\/"};  
 
     Hive.sliceSize (number): Defines the size of text slices for large documents during vector generation. The default value is 512.  
 
