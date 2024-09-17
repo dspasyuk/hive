@@ -45,12 +45,12 @@ console.log(results);
 ```
 
 ### Options 
-  Befor changing default options initialize the database: await Hive.init('Documents', './db/Documents/db.json', "./docs");
-  Hive.sliceSize = 512; //default
-  Hive.models = {text: "Xenova/all-MiniLM-L6-v2", image:"Xenova/clip-vit-base-patch16"};  //default
-  Hive.documents = {text: [".txt", ".doc", ".docx", ".pdf"], image:[".png", ".jpg", ".jpeg"]};  //default
-  Hive.transformersOptions = { pooling: "mean", normalize: false };  //default
-  Hive.escapeRules={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","\\":"\\\\","/":"\\/"}; //default
+  Befor changing default options initialize the database: await Hive.init('Documents', './db/Documents/db.json', "./docs");  
+  Hive.sliceSize = 512; //default  
+  Hive.models = {text: "Xenova/all-MiniLM-L6-v2", image:"Xenova/clip-vit-base-patch16"};  //default  
+  Hive.documents = {text: [".txt", ".doc", ".docx", ".pdf"], image:[".png", ".jpg", ".jpeg"]};  //default  
+  Hive.transformersOptions = { pooling: "mean", normalize: false };  //default  
+  Hive.escapeRules={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","\\":"\\\\","/":"\\/"}; //default  
 
 ### Alternative aproach of creating a database
 
