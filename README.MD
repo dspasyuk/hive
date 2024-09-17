@@ -50,22 +50,22 @@ console.log(results);
       Hive.documents = {text: [".txt", ".doc", ".docx", ".pdf"], image:[".png", ".jpg", ".jpeg"]};  
       Hive.transformersOptions = { pooling: "mean", normalize: false };  
       Hive.escapeRules={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","\\":"\\\\","/":"\\/"};  
-
-    Hive.sliceSize (number): Defines the size of text slices for large documents during vector generation. The default value is 512.  
-
-    Hive.models (object): Specifies the models used for generating embeddings.  
+      
+      Hive.sliceSize (number): Defines the size of text slices for large documents during vector generation. The default value is 512.  
+      
+      Hive.models (object): Specifies the models used for generating embeddings.  
         text (string): The model for text embeddings, e.g., "Xenova/all-MiniLM-L6-v2".  
         image (string): The model for image embeddings, e.g., "Xenova/clip-vit-base-patch16".  
-
-    Hive.documents (object): Defines the types of documents that can be processed for embeddings.  
+      
+      Hive.documents (object): Defines the types of documents that can be processed for embeddings.  
         text (array): List of supported text file extensions, e.g., [".txt", ".doc", ".docx", ".pdf"].  
         image (array): List of supported image file extensions, e.g., [".png", ".jpg", ".jpeg"].  
-
-    Hive.transformersOptions (object): Configures options for transformers.  
+      
+      Hive.transformersOptions (object): Configures options for transformers.  
         pooling (string): Specifies the pooling method, e.g., "mean".  
         normalize (boolean): Determines if vectors should be normalized. Default is false.  
-
-    Hive.escapeRules (object): Defines escape sequences for special characters during text parsing.  
+      
+      Hive.escapeRules (object): Defines escape sequences for special characters during text parsing.  
         &: &amp;  
         <: &lt;  
         >: &gt;  
