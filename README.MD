@@ -16,10 +16,14 @@ In-memory and on-disk persistence
 ```
 npm i @deonis/hive 
 ```
+or 
+```
+git clone https://github.com/dspasyuk/hive
 
+```
 ### Usage 
 ```
-import Hive from 'deonis/hive';  
+import Hive from '@deonis/hive';  
 await Hive.init(dbName, filePath, pathToDocs);
 ```
 
