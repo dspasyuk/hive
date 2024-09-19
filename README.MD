@@ -18,7 +18,7 @@ npm i @deonis/hive
 ```
 
 ### Usage 
-```import Hive from 'hive';  
+```import Hive from 'deonis/hive';  
 await Hive.init(dbName, filePath, pathToDocs);
 ```
 
