@@ -14,8 +14,7 @@ const doc2txt = {};
 // Read text from a .txt file
 doc2txt.readTextFromTxt = async function (filePath) {
   try {
-    const data = await fs.readFile(filePath, 'utf8');
-    return data;
+    return await fs.readFile(filePath, 'utf8');
   } catch (err) {
     console.error("Error reading .txt file:", err.message);
     return "";

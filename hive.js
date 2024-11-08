@@ -28,6 +28,7 @@ Hive.init = async function (options = {}) {
     text: [".txt", ".doc", ".docx", ".pdf"],
     image: [".png", ".jpg", ".jpeg"],
   };
+  Hive.SliceSize = options.SliceSize || 512;
   Hive.minSliceSize = options.minSliceSize || 100;
   Hive.saveInterval = 5000;
   Hive.watch = false;
@@ -271,6 +272,7 @@ Hive.tokenCount = function (text) {
 };
 
 Hive.addItem = async function (input, filePath = "", type = "text") {
+
   try {
     let vector;
     if (type === "text") {
@@ -389,14 +391,15 @@ Hive.readFile = async function (filePath, type) {
     let text = await doc2txt.extractTextFromFile(filePath);
     const [tokens, len] = Hive.tokenCount(text);
     let startIndex = 0;
-    console.log(`Processing file ${filePath}`);
+    // console.log(`Processing file ${filePath}`, text);
     while (startIndex < len) {
       let endIndex = startIndex + this.SliceSize;
       endIndex = Math.min(endIndex, len); // Ensure proper slicing
+     
       if (len > Hive.minSliceSize) {
-        const slice = tokens.slice(startIndex, endIndex);
-        // console.log(filePath, slice.join(" "));
-        await Hive.addItem(slice.join(" "), filePath, type);
+        const slice = tokens.slice(startIndex, endIndex).join(" ");
+        console.log(`Slice: ${slice}`, len ,Hive.minSliceSize, startIndex, endIndex);
+        await Hive.addItem(slice, filePath, type);
       }
       startIndex = endIndex + 1;
     }
