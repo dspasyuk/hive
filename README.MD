@@ -34,7 +34,15 @@ filePath: Path to save/load the database file
 pathToDocs: Optional path to directory containing documents to process 
 
 ```
-await Hive.init('Documents', './db/Documents/db.json', "./docs");
+await Hive.init({
+  dbName: "Documents",
+  pathToDB: "/path/to/my/database.json",
+  pathToDocs: "/path/to/documents",
+  documents: {
+    text: [".txt", ".doc", ".docx", ".pdf"]
+  },
+  minSliceSize: 200,
+});
 ```
 
 
