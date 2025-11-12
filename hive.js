@@ -47,6 +47,7 @@ Hive.init = async function (options = {}) {
     "/": "\\/",
   };
   Hive.collections = new Map();
+  Hive.pipeline = null; // FIX: Track pipeline initialization
 
   Hive.createCollection(Hive.dbName);
   Hive.loadToMemory();
@@ -83,9 +84,11 @@ Hive.databaseExists = function () {
 Hive.initTransformers = async function (type) {
   if (!Hive.pipeline) {
     if (type === "text") {
-      Hive.getVector = await Hive.textEmbeddingInit(); // Text embedding
+      Hive.pipeline = await Hive.textEmbeddingInit(); // FIX: Store pipeline reference
+      Hive.getVector = Hive.pipeline; // Text embedding
     } else if (type === "image") {
-      Hive.getVector = await Hive.imageEmbeddingInit(); // Image embedding
+      Hive.pipeline = await Hive.imageEmbeddingInit(); // FIX: Store pipeline reference
+      Hive.getVector = Hive.pipeline; // Image embedding
     } else {
       throw new Error("Unsupported type for embedding");
     }
@@ -116,6 +119,14 @@ Hive.randomId = function () {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 };
 
+Hive.deleteItem = function (id) {
+  if (Hive.collections.has(Hive.dbName)) {
+    const collection = Hive.collections.get(Hive.dbName);
+    const filteredCollection = collection.filter(item => item.id !== id);
+    Hive.collections.set(Hive.dbName, filteredCollection);
+  }
+};
+
 // Insert one object into a specific collection
 Hive.insertOne = function (entry) {
   if (Hive.collections.has(Hive.dbName)) {
@@ -127,6 +138,7 @@ Hive.insertOne = function (entry) {
       meta,
       id: Hive.randomId(),
     });
+    Hive.saveToDisk();
   }
 };
 
@@ -165,56 +177,70 @@ Hive.ensureDirectoryExists = function (pathToDB) {
 
 // Save the database to disk
 Hive.saveToDisk = function () {
-  // Clear the previous timeout if it exists
-  if (Hive.saveTimeout) {
-    clearTimeout(Hive.saveTimeout);
-  }
-  Hive.saveTimeout = setTimeout(() => {
-    const data = {};
-    const collectionsKeys = Array.from(Hive.collections.keys());
-    for (let i = 0; i < collectionsKeys.length; i++) {
-      const key = collectionsKeys[i];
-      const value = Hive.collections.get(key);
-      data[key] = [];
-      for (let j = 0; j < value.length; j++) {
-        const entry = value[j];
-        data[key].push({
-          vector: Array.from(entry.vector), // Convert Float32Array back to Array for JSON
-          meta: entry.meta,
-          magnitude: entry.magnitude,
-          id: entry.id,
-        });
-      }
+  console.log("Saving to Disk");
+  return new Promise((resolve, reject) => {
+    // Clear the previous timeout if it exists
+    if (Hive.saveTimeout) {
+      clearTimeout(Hive.saveTimeout);
     }
+    Hive.saveTimeout = setTimeout(() => {
+      try {
+        const data = {};
+        const collectionsKeys = Array.from(Hive.collections.keys());
+        for (let i = 0; i < collectionsKeys.length; i++) {
+          const key = collectionsKeys[i];
+          const value = Hive.collections.get(key);
+          data[key] = [];
+          for (let j = 0; j < value.length; j++) {
+            const entry = value[j];
+            data[key].push({
+              vector: Array.from(entry.vector), // Convert Float32Array back to Array for JSON
+              meta: entry.meta,
+              magnitude: entry.magnitude,
+              id: entry.id,
+            });
+          }
+        }
 
-    Hive.ensureDirectoryExists(Hive.pathToDB);
-    fs.writeFileSync(Hive.pathToDB, JSON.stringify(data), "utf8");
-    console.log(`Database saved to ${Hive.pathToDB}`);
-  }, Hive.saveInterval); // Wait for 5 seconds (10000 ms)
+        Hive.ensureDirectoryExists(Hive.pathToDB);
+        fs.writeFileSync(Hive.pathToDB, JSON.stringify(data), "utf8");
+        console.log(`Database saved to ${Hive.pathToDB}`);
+        resolve();
+      } catch (error) {
+        console.error("Error saving database:", error);
+        reject(error);
+      }
+    }, Hive.saveInterval);
+  });
 };
 
 // Load the database into memory from disk
-Hive.loadToMemory = async function () {
-  if (fs.existsSync(Hive.pathToDB) && Hive.collections.size != 0) {
-    const rawData = fs.readFileSync(Hive.pathToDB, "utf8");
-    const data = JSON.parse(rawData);
-    Hive.collections.clear(); // Clear existing collections
-    for (const [dbName, entries] of Object.entries(data)) {
-      Hive.createCollection(dbName); // Recreate collections
-      const collection = Hive.collections.get(dbName);
-      for (let i = 0; i < entries.length; i++) {
-        const entry = entries[i];
-        collection.push({
-          vector: new Float32Array(entry.vector),
-          meta: entry.meta,
-          magnitude: entry.magnitude,
-          id: entry.id,
-        });
+Hive.loadToMemory = function () {
+  // FIX: Load when collections are empty OR file exists but collections aren't loaded
+  if (fs.existsSync(Hive.pathToDB) && (Hive.collections.size === 0 || Hive.collections.get(Hive.dbName)?.length === 0)) {
+    try {
+      const rawData = fs.readFileSync(Hive.pathToDB, "utf8");
+      const data = JSON.parse(rawData);
+      Hive.collections.clear(); // Clear existing collections
+      for (const [dbName, entries] of Object.entries(data)) {
+        Hive.createCollection(dbName); // Recreate collections
+        const collection = Hive.collections.get(dbName);
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[i];
+          collection.push({
+            vector: new Float32Array(entry.vector),
+            meta: entry.meta,
+            magnitude: entry.magnitude,
+            id: entry.id,
+          });
+        }
       }
+      console.log(`Database loaded into memory from ${Hive.pathToDB}`);
+    } catch (error) {
+      console.error("Error loading database:", error);
     }
-    console.log(`Database loaded into memory from ${Hive.pathToDB}`);
   } else {
-    console.log(`File ${Hive.pathToDB} does not exist.`);
+    console.log(`File ${Hive.pathToDB} does not exist or database already loaded.`);
   }
 };
 
@@ -271,22 +297,36 @@ Hive.tokenCount = function (text) {
   return [tokensarr, tokensarr.length];
 };
 
-Hive.addItem = async function (input, filePath = "", type = "text") {
-
+Hive.addFile = async function (filePath, filename) {
   try {
-    let vector;
-    if (type === "text") {
-      vector = await Hive.getVector(input, Hive.TransOptions);
-    } else if (type === "image") {
-      // Dynamically import sharp only when processing an image
-      vector = await Hive.getVector(filePath, Hive.TransOptions);
+    const { text } = await doc2txt.extractTextFromFile(filePath);
+    if (typeof text === 'string' && text.trim().length > 0) {
+      await Hive.addItem(text, filePath, "text", filename);
     }
+  } catch (error) {
+    console.error("Error adding file:", error);
+  }
+};
+
+Hive.addItem = async function (input, filePath = "", type = "text", filename = "") {
+  try {
+    let result;
+    if (type === "text") {
+      result = await Hive.getVector(input, Hive.TransOptions);
+    } else if (type === "image") {
+      result = await Hive.getVector(filePath, Hive.TransOptions);
+    }
+    
+    // FIX: Handle the result properly - it should have a .data property
+    const vectorData = result.data || result; // Handle both cases
+    
     Hive.insertOne({
-      vector: Array.from(vector.data),
+      vector: Array.isArray(vectorData) ? vectorData : Array.from(vectorData),
       meta: {
         content: type === "text" ? Hive.escapeChars(input) : `Image: ${path.basename(filePath)}`,
         href: filePath,
-        title: type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`,
+        title: filename || (type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`),
+        filePath: filePath, // FIX: Add filePath to meta for consistency
       },
     });
   } catch (error) {
@@ -301,7 +341,12 @@ Hive.pullDocuments = async function (dir) {
     let fullPath = path.join(dir, file.name);
     const ext = path.extname(file.name).toLowerCase();
     if (file.isSymbolicLink()) {
-      fullPath = await fs.promises.readlink(fullPath); // Follow the link
+      try {
+        fullPath = await fs.promises.readlink(fullPath); // Follow the link
+      } catch (error) {
+        console.error(`Error reading symlink ${fullPath}:`, error);
+        continue;
+      }
     }
 
     try {
@@ -327,85 +372,110 @@ Hive.pullDocuments = async function (dir) {
 
 // Update file in the collection
 Hive.updateFile = async function (filePath, type) {
-  let text = "";
-  if (type === "text") {
-    text = await doc2txt.extractTextFromFile(filePath);
+  try {
+    let text = "";
+    if (type === "text") {
+      text = await doc2txt.extractTextFromFile(filePath);
+    }
+    // FIX: Properly handle async getVector call
+    const result = await Hive.getVector(text, Hive.TransOptions);
+    const vectorData = result.data || result;
+    
+    const newEntry = { 
+      vector: Array.isArray(vectorData) ? vectorData : Array.from(vectorData), 
+      meta: { filePath, type },
+      magnitude: Hive.normalize(vectorData),
+      id: Hive.randomId()
+    };
+    Hive.updateOne({ filePath }, newEntry);
+  } catch (error) {
+    console.error(`Error updating file ${filePath}:`, error);
   }
-  // Generate embedding and update only if file content has changed
-  const newEntry = { vector: await Hive.getVector(text, Hive.TransOptions).data, meta: { filePath, type } };
-  Hive.updateOne({ filePath }, newEntry); // Only update matching entry by filePath
 };
 
 Hive.removeFile = function (filePath) {
   const collection = Hive.collections.get(Hive.dbName);
-  Hive.collections.set(
-    Hive.dbName,
-    collection.filter((item) => item.meta.filePath !== filePath)
-  );
+  if (collection) {
+    Hive.collections.set(
+      Hive.dbName,
+      collection.filter((item) => item.meta.filePath !== filePath)
+    );
+  }
 };
 
 Hive.watchDocuments = async function (dir) {
-  const chokidar = await import("chokidar");
-  const watcher = chokidar.watch(dir, {
-    ignored: (file, _stats) => _stats?.isFile() && !file.endsWith(".txt") && !file.endsWith(".doc") && !file.endsWith(".docx") && !file.endsWith(".pdf"),
-    persistent: true,
-  });
+  try {
+    const chokidar = await import("chokidar");
+    const watcher = chokidar.watch(dir, {
+      ignored: (file, _stats) => _stats?.isFile() && !file.endsWith(".txt") && !file.endsWith(".doc") && !file.endsWith(".docx") && !file.endsWith(".pdf"),
+      persistent: true,
+    });
 
-  watcher
-    .on("add", async (filePath) => {
-      console.log(`Checking File: ${filePath}`);
-      if (!(await Hive.fileExistsInDatabase(filePath))) {
+    watcher
+      .on("add", async (filePath) => {
+        console.log(`Checking File: ${filePath}`);
+        if (!(await Hive.fileExistsInDatabase(filePath))) {
+          const ext = path.extname(filePath).toLowerCase();
+          if (Hive.documents.text.includes(ext)) {
+            await Hive.updateFile(filePath, "text");
+          } else if (Hive.documents.image.includes(ext)) {
+            await Hive.updateFile(filePath, "image");
+          }
+        }
+      })
+      .on("change", async (filePath) => {
+        console.log(`File changed: ${filePath}`);
         const ext = path.extname(filePath).toLowerCase();
         if (Hive.documents.text.includes(ext)) {
           await Hive.updateFile(filePath, "text");
         } else if (Hive.documents.image.includes(ext)) {
           await Hive.updateFile(filePath, "image");
         }
-      }
-    })
-    .on("change", async (filePath) => {
-      console.log(`File changed: ${filePath}`);
-      const ext = path.extname(filePath).toLowerCase();
-      if (Hive.documents.text.includes(ext)) {
-        await Hive.updateFile(filePath, "text");
-      } else if (Hive.documents.image.includes(ext)) {
-        await Hive.updateFile(filePath, "image");
-      }
-    })
-    .on("unlink", async (filePath) => {
-      console.log(`File removed: ${filePath}`);
-      Hive.removeFile(filePath);
-      Hive.saveToDisk();
-    });
+      })
+      .on("unlink", async (filePath) => {
+        console.log(`File removed: ${filePath}`);
+        Hive.removeFile(filePath);
+        Hive.saveToDisk();
+      });
+  } catch (error) {
+    console.error("Error setting up file watcher:", error);
+  }
 };
+
 // Check if a file exists in the database
 Hive.fileExistsInDatabase = function (filePath) {
   const collection = Hive.collections.get(Hive.dbName);
+  if (!collection) return false;
   // Look for an entry with the same file path in the collection
   return collection.some((item) => item.meta.filePath === filePath);
 };
 
 // Read file content (text or image) and extract embeddings
 Hive.readFile = async function (filePath, type) {
-  if (type === "text") {
-    let text = await doc2txt.extractTextFromFile(filePath);
-    const [tokens, len] = Hive.tokenCount(text);
-    let startIndex = 0;
-    // console.log(`Processing file ${filePath}`, text);
-    while (startIndex < len) {
-      let endIndex = startIndex + this.SliceSize;
-      endIndex = Math.min(endIndex, len); // Ensure proper slicing
-     
-      if (len > Hive.minSliceSize) {
-        const slice = tokens.slice(startIndex, endIndex).join(" ");
-        console.log(`Slice: ${slice}`, len ,Hive.minSliceSize, startIndex, endIndex);
-        await Hive.addItem(slice, filePath, type);
+  try {
+    if (type === "text") {
+      let { text } = await doc2txt.extractTextFromFile(filePath);
+      const [tokens, len] = Hive.tokenCount(text);
+      let startIndex = 0;
+      
+      while (startIndex < len) {
+        let endIndex = startIndex + Hive.SliceSize; // FIX: Use Hive.SliceSize instead of this.SliceSize
+        endIndex = Math.min(endIndex, len);
+        
+        const sliceLength = endIndex - startIndex;
+        // FIX: Check slice length, not total length
+        if (sliceLength >= Hive.minSliceSize) {
+          const slice = tokens.slice(startIndex, endIndex).join(" ");
+          console.log(`Slice: ${slice}`, len, Hive.minSliceSize, startIndex, endIndex);
+          await Hive.addItem(slice, filePath, type);
+        }
+        startIndex = endIndex; // FIX: Don't skip tokens with +1
       }
-      startIndex = endIndex + 1;
+    } else if (type === "image") {
+      await Hive.addItem("", filePath, type);
     }
-  } else if (type === "image") {
-    // const imageBuffer = fs.readFileSync(filePath); // Read image as buffer
-    await Hive.addItem("", filePath, type);
+  } catch (error) {
+    console.error(`Error reading file ${filePath}:`, error);
   }
 };
 
