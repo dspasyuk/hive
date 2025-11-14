@@ -1,6 +1,6 @@
 {
   "name": "@deonis/hive",
-  "version": "1.2.2",
+  "version": "1.2.6",
   "description": "![Hive](./img/hive.png)",
   "main": "hive.js",
   "scripts": {
