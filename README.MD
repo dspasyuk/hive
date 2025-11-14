@@ -1,132 +1,125 @@
-# Hive (Work in progress)
+# Hive 
 
 ![Hive](./img/hive.png)
 
-Hive is a lightweight document database and vector search engine built with Node.js. It provides an efficient way to store, retrieve, and search documents using vector embeddings.
+**Hive** is a lightweight, file-based document database and vector search engine for Node.js. It's designed for simplicity and efficiency, allowing you to store, retrieve, and search through documents using vector embeddings.
 
-### Features
+## Features
 
-Document storage and retrieval   
-Vector-based similarity search  
-Automatic document processing and tokenization  
-Support for various file formats (txt, doc, docx, pdf, png, jpg, jpeg) (any-text, transformers.js)  
-In-memory and on-disk persistence  
+- **Document Storage**: Store documents with associated metadata.
+- **Vector Search**: Perform similarity searches using vector embeddings.
+- **Automatic Processing**: Automatically process and tokenize various file formats.
+- **File Support**: Supports `.txt`, `.doc`, `.docx`, and `.pdf` out of the box.
+- **Persistence**: Offers both in-memory and on-disk persistence for your data.
+- **Customizable**: Easily extendable to support other file types and embedding models.
 
-### Installation 
+## Installation
+
+You can install Hive using npm:
+
+```bash
+npm i @deonis/hive
 ```
-npm i @deonis/hive 
-```
-or 
-```
+
+Alternatively, you can clone the repository directly:
+
+```bash
 git clone https://github.com/dspasyuk/hive
+```
 
-```
-### Usage 
-```
-import Hive from '@deonis/hive';  
+## Quick Start
+
+Here's a basic example of how to initialize Hive and perform a vector search:
+
+```javascript
+import Hive from '@deonis/hive';
+
+// 1. Initialize Hive
 await Hive.init({
-  dbName: "Documents",
-  pathToDB: "/path/to/my/database.json",
-  pathToDocs: "/path/to/documents",
-  documents: {
-    text: [".txt", ".doc", ".docx", ".pdf"]
-  },
-  minSliceSize: 200,
+  dbName: "MyDocuments",
+  pathToDB: "/path/to/your/database.json",
+  pathToDocs: "/path/to/your/documents",
 });
-```
 
+// 2. Generate a vector for your query
+const queryVector = await Hive.getVector("your search query");
 
-First the Hive will take all your text files from ./docs folder, split it in to chunks (512 tokens), 
-convert them  vectors and create vector database in './db/Documents/db.json'  
+// 3. Perform a search
+const topK = 10; // Number of results to return
+const results = await Hive.find(queryVector.data, topK);
 
-Once database is created you can do a vector search using the following: 
-
-```
-const vector = await Hive.getVector("Hello World", Hive.TransOptions); // uses transformer.js to generate a vector
-const results = await Hive.find(vector.data, 10); // 10 is topK, number of searches to return  
+// 4. Log the results
 console.log(results);
 ```
 
-### Options Description
+When you first initialize Hive with a `pathToDocs`, it will:
+1.  Scan the specified directory for supported text files.
+2.  Split the files into smaller chunks.
+3.  Convert each chunk into a vector embedding.
+4.  Create and save a vector database at the specified `pathToDB`.
+
+## API Reference
+
+### `Hive.init(options)`
+
+Initializes the Hive database with the specified configuration.
+
+-   `options` (Object): Configuration options.
+    -   `dbName` (String): The name of the database. **Default**: `"Documents"`.
+    -   `pathToDB` (String): The full path to the database file, including the filename. **Default**: `db/Documents/Documents.json` inside the module directory.
+    -   `pathToDocs` (String | Boolean): The path to the directory containing your documents. If `false`, no documents will be processed automatically. **Default**: `false`.
+    -   `documents` (Object): An object specifying the file extensions to process for different data types.
+        -   `text` (Array): An array of file extensions for text documents. **Default**: `[".txt", ".doc", ".docx", ".pdf"]`.
+    -   `minSliceSize` (Number): The minimum size (in tokens) for a text chunk to be processed. **Default**: `200`.
+
+### `Hive.getVector(text, options)`
+
+Generates a vector embedding for the given text.
+
+-   `text` (String): The input text to convert into a vector.
+-   `options` (Object): Transformer options. **Default**: `{ pooling: "mean", normalize: false }`.
+
+### `Hive.find(queryVector, topK)`
+
+Finds the most similar documents to a given query vector.
+
+-   `queryVector` (Array): The vector to search with.
+-   `topK` (Number): The number of top results to return. **Default**: `10`.
+
+### `Hive.insertOne(entry)`
+
+Inserts a single document into the database. This is useful for manually adding data without a source file.
+
+-   `entry` (Object): An object containing the vector and metadata.
+    -   `vector` (Array): The vector embedding.
+    -   `meta` (Object): Metadata associated with the document.
+
+**Example:**
+
+```javascript
+Hive.insertOne({
+  vector: [0.1, 0.2, ...],
+  meta: { content: "This is a manually added document." }
+});
 ```
-Hive.sliceSize = 512;  
-Hive.models = {text: "Xenova/all-MiniLM-L6-v2", image:"Xenova/clip-vit-base-patch16"};  
-Hive.documents = {text: [".txt", ".doc", ".docx", ".pdf"], image:[".png", ".jpg", ".jpeg"]};  
-Hive.TransOptions = { pooling: "mean", normalize: false };  
-Hive.escapeRules={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;","\\":"\\\\","/":"\\/"};  
 
-Hive.sliceSize (number): Defines the size of text slices for large documents during vector generation. The default value is 512.  
+### `Hive.updateOne(query, entry)`
 
-Hive.models (object): Specifies the models used for generating embeddings.  
-  text (string): The model for text embeddings, e.g., "Xenova/all-MiniLM-L6-v2".  
-  image (string): The model for image embeddings, e.g., "Xenova/clip-vit-base-patch16".  
+Updates an existing document in the database.
 
-Hive.documents (object): Defines the types of documents that can be processed for embeddings.  
-  text (array): List of supported text file extensions, e.g., [".txt", ".doc", ".docx", ".pdf"].  
-  image (array): List of supported image file extensions, e.g., [".png", ".jpg", ".jpeg"].  
+-   `query` (Object): A query to find the document to update (e.g., `{ filePath: "/path/to/doc.txt" }`).
+-   `entry` (Object): The new document entry.
 
-Hive.TransOptions (object): Configures options for transformers.  
-  pooling (string): Specifies the pooling method, e.g., "mean".  
-  normalize (boolean): Determines if vectors should be normalized. Default is false.  
+### `Hive.insertMany(entries)`
 
-Hive.escapeRules (object): Defines escape sequences for special characters during text parsing.  
-  &: &amp;  
-  <: &lt;  
-  >: &gt;  
-  ": &quot;  
-  ': &#39;  
-  \: \\  
-  /: \/  
-```
-These options allow you to customize how Hive processes and stores text and image embeddings. Adjust these settings based on your specific requirements and the types of documents you plan to work with.
+Inserts an array of documents into the database in a single operation.
 
-### Alternative aproach of creating a database
+-   `entries` (Array): An array of document objects to insert.
 
-By default Hive user transformers.js (Xenova/all-MiniLM-L6-v2) to create vector embeddings for your data and query but you can easily bypass that using inserOne function 
+## Performance
 
-```
-Hive.insertOne({vector: Array,  meta: {}});
-```
-### Speed
+Hive is optimized to handle large datasets. A search in a database with **30,000 entries** takes approximately **30ms** on an AMD Ryzen 7 3700X 8-Core Processor.
 
-The database was optimized to handle well above 1,000,000 entries (512 tokens) large.
-On Average it takes around 30 ms to search a database with 30,000 entries (AMD Ryzen 7 3700X 8-Core Processor)
+## License
 
-### Insert Data
-
-```Hive.insertOne(entry)```
-
-    entry: An object containing the vector and metadata for the document. {vector:[], meta:{}}
-
-Inserts a single entry into the collection. The entry includes the vector (features extracted from text) and associated metadata.
-
-
-### Update Data
-
-```Hive.updateOne(query, entry)```
-
-    entry: An object containing the vector and metadata for the document. {vector:[], meta:{}}
-    query: An object containing filePath {filePath:"/path/to/doc.txt"}
-
-Inserts a single entry into the collection. The entry includes the vector (features extracted from text) and associated metadata.
-
-### Insert Array of Data
-
-```Hive.insertMany(entries)```
-
-    entries: An array of objects, where each object contains a vector and meta.
-
-Inserts multiple entries into the collection at once. Automatically saves the database to disk after bulk insertion.
-
-### Query Data
-
-```Hive.find(queryVector, topK = 5)```
-
-    queryVector: The vector to compare against.
-    topK: Number of top similar results to return (default: 5).
-
-Finds the top K vectors similar to the queryVector based on cosine similarity. Returns the most similar documents from the collection.
-
-
-License MIT
 This project is licensed under the MIT License.
