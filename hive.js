@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename); // remove
 
 function Hive() {}
-
+Hive.collections = new Map();
 // Initialize Hive DB with support for both text and image embeddings
 Hive.init = async function (options = {}) {
   // Default parameters
@@ -46,7 +46,7 @@ Hive.init = async function (options = {}) {
     "\\": "\\\\",
     "/": "\\/",
   };
-  Hive.collections = new Map();
+ 
   Hive.pipeline = null; // FIX: Track pipeline initialization
 
   Hive.createCollection(Hive.dbName);
