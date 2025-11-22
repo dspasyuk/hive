@@ -2,7 +2,7 @@
 import Hive from './hive.js'
 await Hive.init({dbName:'Documents', pathToDocs:"./doc"});
 
-const vector = await Hive.getVector("Wherefore rejoice? What conquest brings he home?", Hive.TransOptions);
+const vector = await Hive.getVector("Tut, I have lost myself; I am not here; This is not Romeo, he's some other where.", Hive.TransOptions);
 var results;
 console.time("find");
 results = await Hive.find(vector.data, 3);
