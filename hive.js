@@ -16,15 +16,16 @@ const __dirname = path.dirname(__filename);
 
 class Hive {
   static collections = new Map();
-  static pipeline = null;
+  static pipelines = {};
   static saveTimeout = null;
 
   // Default configuration
   static dbName = "Documents";
-  static pathToDB = path.join(__dirname, "db", "Documents", "Documents.json");
+  static pathToDB = path.join(process.cwd(), "db", "Documents", "Documents.json");
   static pathToDocs = false;
-  static type = "text";
+  static type = "text"; // Deprecated but kept for backward compatibility
   static watch = false;
+  static logging = false;
   static documents = {
     text: [".txt", ".doc", ".docx", ".pdf"],
     image: [".png", ".jpg", ".jpeg"],
@@ -53,22 +54,32 @@ class Hive {
    */
   static async init(options = {}) {
     Hive.dbName = options.dbName || Hive.dbName;
-    Hive.pathToDB = options.pathToDB || Hive.pathToDB;
+    
+    if (options.pathToDB) {
+      Hive.pathToDB = options.pathToDB;
+    } else if (options.storageDir) {
+      Hive.pathToDB = path.join(options.storageDir, Hive.dbName, Hive.dbName + ".json");
+    } else {
+      // Default to process.cwd() to store in project root, updating with dbName
+      Hive.pathToDB = path.join(process.cwd(), "db", Hive.dbName, Hive.dbName + ".json");
+    }
+
     Hive.pathToDocs = options.pathToDocs !== undefined ? options.pathToDocs : Hive.pathToDocs;
-    Hive.type = options.type || Hive.type;
-    Hive.watch = options.watch !== undefined ? options.watch : Hive.watch; // Fix: Respect options.watch
+    Hive.type = options.type || Hive.type; // Restored for backward compatibility
+    Hive.watch = options.watch !== undefined ? options.watch : Hive.watch;
+    Hive.logging = options.logging !== undefined ? options.logging : Hive.logging;
     Hive.documents = options.documents || Hive.documents;
     Hive.SliceSize = options.SliceSize || Hive.SliceSize;
     Hive.minSliceSize = options.minSliceSize || Hive.minSliceSize;
 
     Hive.createCollection(Hive.dbName);
-    await Hive.loadToMemory(); // Make load async
-    await Hive.initTransformers(Hive.type);
+    await Hive.loadToMemory();
+    await Hive.initTransformers();
 
     if (Hive.pathToDocs) {
       if (fs.existsSync(Hive.pathToDocs)) {
         if (!Hive.databaseExists()) {
-          await Hive.pullDocuments(Hive.pathToDocs, Hive.type);
+          await Hive.pullDocuments(Hive.pathToDocs);
         } else {
           // Already loaded to memory above
           if (Hive.watch) {
@@ -76,10 +87,10 @@ class Hive {
           }
         }
       } else {
-        console.log(`Document folder "${Hive.pathToDocs}" does not exist`);
+        Hive.log(`Document folder "${Hive.pathToDocs}" does not exist`);
       }
     } else {
-      console.log(`Document folder not defined`);
+      Hive.log(`Document folder not defined`);
     }
   }
 
@@ -88,7 +99,6 @@ class Hive {
    * @returns {boolean}
    */
   static databaseExists() {
-    // Synchronous check is fine here as it's a quick check
     if (fs.existsSync(Hive.pathToDB)) {
         try {
             const stats = fs.statSync(Hive.pathToDB);
@@ -101,22 +111,42 @@ class Hive {
   }
 
   /**
-   * Initialize transformers pipeline based on input type
-   * @param {string} type
+   * Initialize transformers pipelines
    */
-  static async initTransformers(type) {
-    if (!Hive.pipeline) {
-      if (type === "text") {
-        Hive.pipeline = await Hive.textEmbeddingInit();
-        Hive.getVector = Hive.pipeline;
-      } else if (type === "image") {
-        Hive.pipeline = await Hive.imageEmbeddingInit();
-        Hive.getVector = Hive.pipeline;
-      } else {
-        throw new Error("Unsupported type for embedding");
+  static async initTransformers() {
+    if (!Hive.pipelines.text) {
+        Hive.log("Initializing Text Model...");
+        Hive.pipelines.text = await Hive.textEmbeddingInit();
+    }
+    if (!Hive.pipelines.image) {
+        Hive.log("Initializing Image Model...");
+        Hive.pipelines.image = await Hive.imageEmbeddingInit();
+    }
+  }
+
+  /**
+   * Legacy support for getVector
+   * @param {string} input
+   * @param {Object} options
+   */
+  static async getVector(input, options) {
+      let type = Hive.type || 'text';
+      
+      // Auto-detect image type from extension if input is a string path
+      if (typeof input === 'string') {
+          const ext = path.extname(input).toLowerCase();
+          if (Hive.documents.image.includes(ext)) {
+              type = 'image';
+          }
       }
-    } else {
-      console.log(`Transformers already initialized`);
+
+      const vector = await Hive.embed(input, type);
+      return { data: vector };
+  }
+
+  static log(...args) {
+    if (Hive.logging) {
+      console.log(...args);
     }
   }
 
@@ -136,7 +166,7 @@ class Hive {
     if (!Hive.collections.has(name)) {
       Hive.collections.set(name, []);
     } else {
-      console.log(`Collection ${name} already exists.`);
+      Hive.log(`Collection ${name} already exists.`);
     }
   }
 
@@ -165,6 +195,7 @@ class Hive {
     if (Hive.collections.has(Hive.dbName)) {
       const { vector, meta } = entry;
       const magnitude = Hive.normalize(vector);
+      Hive.log("Inserting entry:", entry);
       Hive.collections.get(Hive.dbName).push({
         vector,
         magnitude,
@@ -205,7 +236,7 @@ class Hive {
       }
       Hive.saveToDisk();
     } else {
-      console.log(`Collection ${Hive.dbName} does not exist.`);
+      Hive.log(`Collection ${Hive.dbName} does not exist.`);
     }
   }
 
@@ -222,7 +253,6 @@ class Hive {
    * Save the database to disk using atomic write
    */
   static saveToDisk() {
-    console.log("Saving to Disk");
     return new Promise((resolve, reject) => {
       if (Hive.saveTimeout) {
         clearTimeout(Hive.saveTimeout);
@@ -231,12 +261,17 @@ class Hive {
         try {
           const data = {};
           for (const [key, value] of Hive.collections.entries()) {
-            data[key] = value.map(entry => ({
-              vector: Array.from(entry.vector),
-              meta: entry.meta,
-              magnitude: entry.magnitude,
-              id: entry.id,
-            }));
+            const collection = [];
+            for (let i = 0; i < value.length; i++) {
+              const entry = value[i];
+              collection.push({
+                vector: Array.from(entry.vector),
+                meta: entry.meta,
+                magnitude: entry.magnitude,
+                id: entry.id,
+              });
+            }
+            data[key] = collection;
           }
 
           await Hive.ensureDirectoryExists(Hive.pathToDB);
@@ -246,7 +281,7 @@ class Hive {
           await fs.promises.writeFile(tempPath, JSON.stringify(data), "utf8");
           await fs.promises.rename(tempPath, Hive.pathToDB);
           
-          console.log(`Database saved to ${Hive.pathToDB}`);
+          Hive.log(`Database saved to ${Hive.pathToDB}`);
           resolve();
         } catch (error) {
           console.error("Error saving database:", error);
@@ -277,14 +312,10 @@ class Hive {
             });
           }
         }
-        console.log(`Database loaded into memory from ${Hive.pathToDB}`);
+        Hive.log(`Database loaded into memory from ${Hive.pathToDB}`);
       } catch (error) {
         console.error("Error loading database:", error);
       }
-    } else {
-      // Silent return if file doesn't exist or DB already loaded is fine, 
-      // but logging might be useful for debugging.
-      // console.log(`File ${Hive.pathToDB} does not exist or database already loaded.`);
     }
   }
 
@@ -317,11 +348,13 @@ class Hive {
     const collection = Hive.collections.get(Hive.dbName) || [];
     const results = [];
     
-    // Optimization: Use a min-heap or just sort if K is small (sort is fine for now)
     for (let i = 0; i < collection.length; i++) {
       const item = collection[i];
-      const similarity = Hive.cosineSimilarity(queryVector, item.vector, queryVectorMag, item.magnitude);
-      results.push({ document: item, similarity });
+      // Only compare vectors of the same dimension
+      if (item.vector.length === queryVector.length) {
+          const similarity = Hive.cosineSimilarity(queryVector, item.vector, queryVectorMag, item.magnitude);
+          results.push({ document: item, similarity });
+      }
     }
     results.sort((a, b) => b.similarity - a.similarity);
     return results.slice(0, topK);
@@ -357,9 +390,14 @@ class Hive {
 
   static async addFile(filePath, filename) {
     try {
-      const { text } = await doc2txt.extractTextFromFile(filePath);
-      if (typeof text === 'string' && text.trim().length > 0) {
-        await Hive.addItem(text, filePath, "text", filename);
+      const ext = path.extname(filePath).toLowerCase();
+      if (Hive.documents.text.includes(ext)) {
+          const { text } = await doc2txt.extractTextFromFile(filePath);
+          if (typeof text === 'string' && text.trim().length > 0) {
+            await Hive.addItem(text, filePath, "text", filename);
+          }
+      } else if (Hive.documents.image.includes(ext)) {
+          await Hive.addItem("", filePath, "image", filename);
       }
     } catch (error) {
       console.error("Error adding file:", error);
@@ -370,9 +408,13 @@ class Hive {
     try {
       let result;
       if (type === "text") {
-        result = await Hive.getVector(input, Hive.TransOptions);
+        if (!Hive.pipelines.text) await Hive.initTransformers();
+        result = await Hive.pipelines.text(input, Hive.TransOptions);
       } else if (type === "image") {
-        result = await Hive.getVector(filePath, Hive.TransOptions);
+        if (!Hive.pipelines.image) await Hive.initTransformers();
+        result = await Hive.pipelines.image(filePath, Hive.TransOptions);
+      } else {
+          throw new Error(`Unsupported type: ${type}`);
       }
       
       const vectorData = result.data || result;
@@ -384,6 +426,7 @@ class Hive {
           href: filePath,
           title: filename || (type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`),
           filePath: filePath,
+          type: type // Store type in metadata
         },
       });
     } catch (error) {
@@ -416,7 +459,7 @@ class Hive {
             } else if (Hive.documents.image.includes(ext)) {
               await Hive.readFile(fullPath, "image");
             } else {
-              console.log(`Skipping unsupported file: ${fullPath}`);
+              // Hive.log(`Skipping unsupported file: ${fullPath}`);
             }
           } catch (error) {
             console.error(`Error processing file ${fullPath}: ${error}`);
@@ -428,18 +471,43 @@ class Hive {
     }
   }
 
-  static async updateFile(filePath, type) {
+  static async updateFile(filePath) {
     try {
-      let text = "";
-      if (type === "text") {
-        text = await doc2txt.extractTextFromFile(filePath);
+      const ext = path.extname(filePath).toLowerCase();
+      let type = "text";
+      if (Hive.documents.image.includes(ext)) {
+          type = "image";
+      } else if (!Hive.documents.text.includes(ext)) {
+          Hive.log(`Unsupported file type for update: ${filePath}`);
+          return;
       }
-      const result = await Hive.getVector(text, Hive.TransOptions);
+
+      let input = "";
+      if (type === "text") {
+        const extracted = await doc2txt.extractTextFromFile(filePath);
+        input = extracted.text;
+      } else {
+          input = filePath; // For images, input is the path
+      }
+
+      let result;
+      if (type === "text") {
+          result = await Hive.pipelines.text(input, Hive.TransOptions);
+      } else {
+          result = await Hive.pipelines.image(input, Hive.TransOptions);
+      }
+
       const vectorData = result.data || result;
       
       const newEntry = { 
         vector: Array.isArray(vectorData) ? vectorData : Array.from(vectorData), 
-        meta: { filePath, type },
+        meta: { 
+            filePath, 
+            type,
+            content: type === "text" ? Hive.escapeChars(input) : `Image: ${path.basename(filePath)}`,
+            title: type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`,
+            href: filePath
+        },
         magnitude: Hive.normalize(vectorData),
         id: Hive.randomId()
       };
@@ -463,33 +531,28 @@ class Hive {
     try {
       const chokidar = await import("chokidar");
       const watcher = chokidar.watch(dir, {
-        ignored: (file, _stats) => _stats?.isFile() && !file.endsWith(".txt") && !file.endsWith(".doc") && !file.endsWith(".docx") && !file.endsWith(".pdf"),
+        ignored: (file, _stats) => {
+            if (!_stats) return false;
+            if (_stats.isDirectory()) return false;
+            const ext = path.extname(file).toLowerCase();
+            return !Hive.documents.text.includes(ext) && !Hive.documents.image.includes(ext);
+        },
         persistent: true,
       });
 
       watcher
         .on("add", async (filePath) => {
-          console.log(`Checking File: ${filePath}`);
+          Hive.log(`Checking File: ${filePath}`);
           if (!(await Hive.fileExistsInDatabase(filePath))) {
-            const ext = path.extname(filePath).toLowerCase();
-            if (Hive.documents.text.includes(ext)) {
-              await Hive.updateFile(filePath, "text");
-            } else if (Hive.documents.image.includes(ext)) {
-              await Hive.updateFile(filePath, "image");
-            }
+             await Hive.updateFile(filePath);
           }
         })
         .on("change", async (filePath) => {
-          console.log(`File changed: ${filePath}`);
-          const ext = path.extname(filePath).toLowerCase();
-          if (Hive.documents.text.includes(ext)) {
-            await Hive.updateFile(filePath, "text");
-          } else if (Hive.documents.image.includes(ext)) {
-            await Hive.updateFile(filePath, "image");
-          }
+          Hive.log(`File changed: ${filePath}`);
+          await Hive.updateFile(filePath);
         })
         .on("unlink", async (filePath) => {
-          console.log(`File removed: ${filePath}`);
+          Hive.log(`File removed: ${filePath}`);
           Hive.removeFile(filePath);
           Hive.saveToDisk();
         });
@@ -518,7 +581,7 @@ class Hive {
           const sliceLength = endIndex - startIndex;
           if (sliceLength >= Hive.minSliceSize) {
             const slice = tokens.slice(startIndex, endIndex).join(" ");
-            console.log(`Slice: ${slice}`, len, Hive.minSliceSize, startIndex, endIndex);
+            Hive.log(`Slice: ${slice.substring(0, 50)}...`, len, Hive.minSliceSize, startIndex, endIndex);
             await Hive.addItem(slice, filePath, type);
           }
           startIndex = endIndex;
@@ -529,6 +592,21 @@ class Hive {
     } catch (error) {
       console.error(`Error reading file ${filePath}:`, error);
     }
+  }
+
+  /**
+   * Embed input using the specified type
+   * @param {string} input - Text content or image path
+   * @param {string} type - "text" or "image"
+   * @returns {Promise<Array>}
+   */
+  static async embed(input, type = "text") {
+      if (!Hive.pipelines[type]) {
+          await Hive.initTransformers();
+      }
+      const result = await Hive.pipelines[type](input, Hive.TransOptions);
+      const vectorData = result.data || result;
+      return Array.isArray(vectorData) ? vectorData : Array.from(vectorData);
   }
 
   static escapeChars(text) {
