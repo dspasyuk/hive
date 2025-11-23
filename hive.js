@@ -34,7 +34,7 @@ class Hive {
   static saveInterval = 5000;
   static models = {
     text: "Xenova/all-MiniLM-L6-v2",
-    image: "Xenova/clip-vit-base-patch16",
+    image: "Xenova/clip-vit-base-patch32",
   };
   static TransOptions = { pooling: "mean", normalize: false };
   static escapeRules = {
