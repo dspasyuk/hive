@@ -178,7 +178,7 @@ class Hive {
    * Delete item by ID
    * @param {string} id
    */
-  static deleteItem(id) {
+  static deleteOne(id) {
     if (Hive.collections.has(Hive.dbName)) {
       const collection = Hive.collections.get(Hive.dbName);
       const filteredCollection = collection.filter((item) => item.id !== id);

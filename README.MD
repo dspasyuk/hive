@@ -121,7 +121,7 @@ Inserts a single document into the database.
     -   `vector` (Array): The vector embedding.
     -   `meta` (Object): Metadata associated with the document.
 
-### `Hive.deleteItem(id)`
+### `Hive.deleteOne(id)`
 
 Deletes a specific item from the database by its ID.
 
