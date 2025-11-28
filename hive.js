@@ -612,11 +612,8 @@ class Hive {
   static escapeChars(text) {
     return (
       text
-        .replace(/[&<>"'\\\/]/g, (match) => {
-          return Hive.escapeRules[match];
-        })
         .replace(/\b(?:TEY|FY|AFRL\s+\d+|[0-9]{2,})\b/g, "")
-        .replace(/[^A-Za-z0-9\s]/g, "")
+        .replace(/[^A-Za-z0-9\s]/g, " ")
         .replace(/\s+/g, " ")
         .replace(/\b([A-Za-z])\b(\s+\1)+/g, "")
         .replace(/\b[A-Za-z]\b/g, "")
