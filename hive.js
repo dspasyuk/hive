@@ -3,12 +3,12 @@ import fs from "fs";
 import path from "path";
 import doc2txt from "./doc2txt.js";
 import { fileURLToPath } from "url";
+import readline from "readline";
 
 /**
  * Copyright Denis Spasyuk
  * The Hive class is a database management system that provides a simple and efficient way to store and retrieve data.
- * It uses a file-based storage system and supports various operations such as creating collections, inserting data, and querying the database.
- * The class also includes functionality for loading and saving the database to disk, as well as integrating with natural language processing models for feature extraction.
+ * Updated to support Hybrid Search (Cosine + Reranking) and Scientific Data.
  */
 
 const __filename = fileURLToPath(import.meta.url);
@@ -18,14 +18,20 @@ class Hive {
   static collections = new Map();
   static pipelines = {};
   static saveTimeout = null;
+  static isSaving = false;
 
   // Default configuration
   static dbName = "Documents";
   static pathToDB = path.join(process.cwd(), "db", "Documents", "Documents.json");
   static pathToDocs = false;
-  static type = "text"; // Deprecated but kept for backward compatibility
+  static type = "text"; 
   static watch = false;
   static logging = false;
+  
+  // NEW: Reranking Configuration
+  static useRerank = false;
+
+
   static documents = {
     text: [".txt", ".doc", ".docx", ".pdf"],
     image: [".png", ".jpg", ".jpeg"],
@@ -33,23 +39,18 @@ class Hive {
   static SliceSize = 512;
   static minSliceSize = 100;
   static saveInterval = 5000;
+  
+  // Updated models for better accuracy
   static models = {
-    text: "Xenova/all-MiniLM-L6-v2",
-    image: "Xenova/clip-vit-base-patch32",
+    text: "Xenova/bge-base-en-v1.5", // Upgraded from MiniLM for better retrieval
+    image: "Xenova/clip-vit-base-patch32", //Xenova/siglip-base-patch16-224 clip-vit-base-patch32 Upgraded from CLIP for better feature extraction
+    rerank: "Xenova/ms-marco-MiniLM-L-6-v2",
   };
+  
   static TransOptions = { pooling: "mean", normalize: false };
-  static escapeRules = {
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-    "\\": "\\\\",
-    "/": "\\/",
-  };
 
   /**
-   * Initialize Hive DB with support for both text and image embeddings
+   * Initialize Hive DB with support for both text and image embeddings + Reranking
    * @param {Object} options
    */
   static async init(options = {}) {
@@ -60,17 +61,24 @@ class Hive {
     } else if (options.storageDir) {
       Hive.pathToDB = path.join(options.storageDir, Hive.dbName, Hive.dbName + ".json");
     } else {
-      // Default to process.cwd() to store in project root, updating with dbName
       Hive.pathToDB = path.join(process.cwd(), "db", Hive.dbName, Hive.dbName + ".json");
     }
 
     Hive.pathToDocs = options.pathToDocs !== undefined ? options.pathToDocs : Hive.pathToDocs;
-    Hive.type = options.type || Hive.type; // Restored for backward compatibility
+    Hive.type = options.type || Hive.type;
     Hive.watch = options.watch !== undefined ? options.watch : Hive.watch;
     Hive.logging = options.logging !== undefined ? options.logging : Hive.logging;
     Hive.documents = options.documents || Hive.documents;
     Hive.SliceSize = options.SliceSize || Hive.SliceSize;
     Hive.minSliceSize = options.minSliceSize || Hive.minSliceSize;
+
+    // NEW: Enable Re-ranking
+    Hive.useRerank = options.rerank !== undefined ? options.rerank : false;
+
+    // NEW: Allow custom models
+    if (options.models) {
+        Hive.models = { ...Hive.models, ...options.models };
+    }
 
     Hive.createCollection(Hive.dbName);
     await Hive.loadToMemory();
@@ -81,7 +89,6 @@ class Hive {
         if (!Hive.databaseExists()) {
           await Hive.pullDocuments(Hive.pathToDocs);
         } else {
-          // Already loaded to memory above
           if (Hive.watch) {
             Hive.watchDocuments(Hive.pathToDocs);
           }
@@ -94,10 +101,6 @@ class Hive {
     }
   }
 
-  /**
-   * Check if database file exists and has content
-   * @returns {boolean}
-   */
   static databaseExists() {
     if (fs.existsSync(Hive.pathToDB)) {
         try {
@@ -111,7 +114,7 @@ class Hive {
   }
 
   /**
-   * Initialize transformers pipelines
+   * Initialize transformers pipelines (Embedding + Reranker)
    */
   static async initTransformers() {
     if (!Hive.pipelines.text) {
@@ -122,13 +125,12 @@ class Hive {
         Hive.log("Initializing Image Model...");
         Hive.pipelines.image = await Hive.imageEmbeddingInit();
     }
+    // NEW: Initialize Reranker if enabled
+    if (Hive.useRerank && !Hive.pipelines.reranker) {
+        Hive.log("Initializing Re-ranker...");
+        Hive.pipelines.reranker = await pipeline("text-classification", Hive.models.rerank);
+    }
   }
-
-  /**
-   * Legacy support for getVector
-   * @param {string} input
-   * @param {Object} options
-   */
   static async getVector(input, options) {
       let type = Hive.type || 'text';
       
@@ -143,7 +145,6 @@ class Hive {
       const vector = await Hive.embed(input, type);
       return { data: vector };
   }
-
   static log(...args) {
     if (Hive.logging) {
       console.log(...args);
@@ -158,15 +159,9 @@ class Hive {
     return await pipeline("image-feature-extraction", Hive.models.image);
   }
 
-  /**
-   * Create a collection
-   * @param {string} name
-   */
   static createCollection(name = Hive.dbName) {
     if (!Hive.collections.has(name)) {
       Hive.collections.set(name, []);
-    } else {
-      Hive.log(`Collection ${name} already exists.`);
     }
   }
 
@@ -174,10 +169,6 @@ class Hive {
     return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
   }
 
-  /**
-   * Delete item by ID
-   * @param {string} id
-   */
   static deleteOne(id) {
     if (Hive.collections.has(Hive.dbName)) {
       const collection = Hive.collections.get(Hive.dbName);
@@ -187,15 +178,11 @@ class Hive {
     }
   }
 
-  /**
-   * Insert one object into a specific collection
-   * @param {Object} entry
-   */
   static insertOne(entry) {
     if (Hive.collections.has(Hive.dbName)) {
       const { vector, meta } = entry;
       const magnitude = Hive.normalize(vector);
-      Hive.log("Inserting entry:", entry);
+      Hive.log("Inserting entry:", entry.meta.title);
       Hive.collections.get(Hive.dbName).push({
         vector,
         magnitude,
@@ -206,11 +193,6 @@ class Hive {
     }
   }
 
-  /**
-   * Update one entry based on query
-   * @param {Object} query
-   * @param {Object} entry
-   */
   static updateOne(query, entry) {
     if (Hive.collections.has(Hive.dbName)) {
       Hive.findMeta(query, entry);
@@ -218,10 +200,6 @@ class Hive {
     }
   }
 
-  /**
-   * Insert many entries into a collection
-   * @param {Array} entries
-   */
   static insertMany(entries) {
     if (Hive.collections.has(Hive.dbName)) {
       const collection = Hive.collections.get(Hive.dbName);
@@ -235,8 +213,6 @@ class Hive {
         });
       }
       Hive.saveToDisk();
-    } else {
-      Hive.log(`Collection ${Hive.dbName} does not exist.`);
     }
   }
 
@@ -249,36 +225,51 @@ class Hive {
     }
   }
 
-  /**
-   * Save the database to disk using atomic write
-   */
   static saveToDisk() {
     return new Promise((resolve, reject) => {
       if (Hive.saveTimeout) {
         clearTimeout(Hive.saveTimeout);
       }
       Hive.saveTimeout = setTimeout(async () => {
+        if (Hive.isSaving) {
+            // If already saving, schedule another save after a short delay
+            Hive.saveToDisk(); 
+            return;
+        }
+        
+        Hive.isSaving = true;
         try {
-          const data = {};
-          for (const [key, value] of Hive.collections.entries()) {
-            const collection = [];
-            for (let i = 0; i < value.length; i++) {
-              const entry = value[i];
-              collection.push({
-                vector: Array.from(entry.vector),
-                meta: entry.meta,
-                magnitude: entry.magnitude,
-                id: entry.id,
-              });
-            }
-            data[key] = collection;
-          }
-
           await Hive.ensureDirectoryExists(Hive.pathToDB);
-          
-          // Atomic write: write to temp file then rename
           const tempPath = `${Hive.pathToDB}.tmp`;
-          await fs.promises.writeFile(tempPath, JSON.stringify(data), "utf8");
+          const fileStream = fs.createWriteStream(tempPath, { flags: 'w' });
+          
+          let error = null;
+          fileStream.on('error', (err) => { error = err; });
+
+          for (const [key, value] of Hive.collections.entries()) {
+            for (const entry of value) {
+                const record = {
+                    collection: key,
+                    id: entry.id,
+                    vector: Array.from(entry.vector),
+                    meta: entry.meta,
+                    magnitude: entry.magnitude
+                };
+                const line = JSON.stringify(record) + '\n';
+                if (!fileStream.write(line)) {
+                    await new Promise(resolve => fileStream.once('drain', resolve));
+                }
+            }
+          }
+          
+          fileStream.end();
+          await new Promise((resolve, reject) => {
+              fileStream.on('finish', resolve);
+              fileStream.on('error', reject);
+          });
+
+          if (error) throw error;
+
           await fs.promises.rename(tempPath, Hive.pathToDB);
           
           Hive.log(`Database saved to ${Hive.pathToDB}`);
@@ -286,31 +277,65 @@ class Hive {
         } catch (error) {
           console.error("Error saving database:", error);
           reject(error);
+        } finally {
+            Hive.isSaving = false;
         }
       }, Hive.saveInterval);
     });
   }
 
-  /**
-   * Load the database into memory from disk
-   */
   static async loadToMemory() {
     if (fs.existsSync(Hive.pathToDB) && (Hive.collections.size === 0 || Hive.collections.get(Hive.dbName)?.length === 0)) {
       try {
-        const rawData = await fs.promises.readFile(Hive.pathToDB, "utf8");
-        const data = JSON.parse(rawData);
         Hive.collections.clear();
-        for (const [dbName, entries] of Object.entries(data)) {
-          Hive.createCollection(dbName);
-          const collection = Hive.collections.get(dbName);
-          for (const entry of entries) {
-            collection.push({
-              vector: new Float32Array(entry.vector),
-              meta: entry.meta,
-              magnitude: entry.magnitude,
-              id: entry.id,
-            });
-          }
+        const fileStream = fs.createReadStream(Hive.pathToDB);
+        const rl = readline.createInterface({
+            input: fileStream,
+            crlfDelay: Infinity
+        });
+
+        for await (const line of rl) {
+            if (!line.trim()) continue;
+            try {
+                // Try parsing as NDJSON record
+                const record = JSON.parse(line);
+                
+                // Check if it's the legacy format (whole file is one JSON object)
+                // Legacy format: { "Documents": [...] }
+                if (record && !record.collection && !record.vector && typeof record === 'object') {
+                     // It's likely the legacy format loaded as a single line (if minified) 
+                     // or we need to handle it differently. 
+                     // But since we are rebuilding, let's assume NDJSON or try to extract.
+                     for (const [dbName, entries] of Object.entries(record)) {
+                        Hive.createCollection(dbName);
+                        const collection = Hive.collections.get(dbName);
+                        for (const entry of entries) {
+                            collection.push({
+                                vector: new Float32Array(entry.vector),
+                                meta: entry.meta,
+                                magnitude: entry.magnitude,
+                                id: entry.id,
+                            });
+                        }
+                     }
+                     continue;
+                }
+
+                // NDJSON format
+                if (record.collection) {
+                    if (!Hive.collections.has(record.collection)) {
+                        Hive.createCollection(record.collection);
+                    }
+                    Hive.collections.get(record.collection).push({
+                        vector: new Float32Array(record.vector),
+                        meta: record.meta,
+                        magnitude: record.magnitude,
+                        id: record.id,
+                    });
+                }
+            } catch (e) {
+                console.warn("Skipping invalid line in DB:", e.message);
+            }
         }
         Hive.log(`Database loaded into memory from ${Hive.pathToDB}`);
       } catch (error) {
@@ -319,11 +344,6 @@ class Hive {
     }
   }
 
-  /**
-   * Find and replace metadata in collection
-   * @param {Object} query 
-   * @param {Object} entry 
-   */
   static findMeta(query, entry) {
     const collection = Hive.collections.get(Hive.dbName);
     if (!collection) return;
@@ -338,25 +358,70 @@ class Hive {
   }
 
   /**
-   * Find similar vectors
-   * @param {Array} queryVector 
+   * Find similar vectors with optional Re-ranking
+   * @param {Array|string} queryInput - Vector or text
    * @param {number} topK 
    * @returns {Array}
    */
-  static async find(queryVector, topK = 10) {
+  static async find(queryInput, topK = 10) {
+    let queryVector = queryInput;
+    let queryText = "";
+    
+    // Auto-detect if input is text string, store it for re-ranking
+    if (typeof queryInput === "string") {
+        queryText = queryInput;
+        queryVector = await Hive.embed(queryInput, "text");
+    }
+
     const queryVectorMag = Hive.normalize(queryVector);
     const collection = Hive.collections.get(Hive.dbName) || [];
-    const results = [];
+    let results = [];
     
+    // 1. Initial Retrieval (Cosine Similarity)
     for (let i = 0; i < collection.length; i++) {
       const item = collection[i];
-      // Only compare vectors of the same dimension
       if (item.vector.length === queryVector.length) {
           const similarity = Hive.cosineSimilarity(queryVector, item.vector, queryVectorMag, item.magnitude);
           results.push({ document: item, similarity });
       }
     }
+    
+    // Sort by Cosine Similarity
     results.sort((a, b) => b.similarity - a.similarity);
+
+    // 2. Re-ranking (Cross Encoder)
+    if (Hive.useRerank && Hive.pipelines.reranker && queryText) {
+        // Fetch a larger candidate pool (3x topK) to rerank
+        const candidates = results.slice(0, topK * 3);
+        const rerankedResults = [];
+
+        for (const res of candidates) {
+            // Truncate doc text to ~1000 chars to fit context window
+            const docText = res.document.meta.content ? res.document.meta.content.slice(0, 1000) : "";
+            
+            try {
+                // Cross-encoder scores the pair [Query, Document]
+                const output = await Hive.pipelines.reranker(queryText, { text_pair: docText });
+                
+                // Extract score (handling different pipeline output formats)
+                const score = output[0]?.score || output.score || 0;
+                
+                rerankedResults.push({
+                    document: res.document,
+                    similarity: score, // This is now a relevance score, not cosine
+                    original_similarity: res.similarity 
+                });
+            } catch (err) {
+                // Keep original if rerank fails
+                rerankedResults.push(res);
+            }
+        }
+        
+        // Sort by Cross-Encoder score
+        rerankedResults.sort((a, b) => b.similarity - a.similarity);
+        return rerankedResults.slice(0, topK);
+    }
+
     return results.slice(0, topK);
   }
 
@@ -378,14 +443,7 @@ class Hive {
 
   static tokenCount(text) {
     const tokens = text.match(/\b\w+\b/g) || [];
-    const tokensarr = [];
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i];
-      if (/\S/.test(token)) {
-        tokensarr.push(token);
-      }
-    }
-    return [tokensarr, tokensarr.length];
+    return [tokens, tokens.length];
   }
 
   static async addFile(filePath, filename) {
@@ -413,20 +471,21 @@ class Hive {
       } else if (type === "image") {
         if (!Hive.pipelines.image) await Hive.initTransformers();
         result = await Hive.pipelines.image(filePath, Hive.TransOptions);
-      } else {
-          throw new Error(`Unsupported type: ${type}`);
       }
       
       const vectorData = result.data || result;
       
+      // Use filename if provided, otherwise derive
+      const actualTitle = filename || (type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`);
+
       Hive.insertOne({
         vector: Array.isArray(vectorData) ? vectorData : Array.from(vectorData),
         meta: {
           content: type === "text" ? Hive.escapeChars(input) : `Image: ${path.basename(filePath)}`,
           href: filePath,
-          title: filename || (type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`),
+          title: actualTitle,
           filePath: filePath,
-          type: type // Store type in metadata
+          type: type 
         },
       });
     } catch (error) {
@@ -444,10 +503,7 @@ class Hive {
           if (file.isSymbolicLink()) {
             try {
               fullPath = await fs.promises.readlink(fullPath);
-            } catch (error) {
-              console.error(`Error reading symlink ${fullPath}:`, error);
-              continue;
-            }
+            } catch (error) { continue; }
           }
       
           try {
@@ -458,12 +514,8 @@ class Hive {
               await Hive.readFile(fullPath, "text");
             } else if (Hive.documents.image.includes(ext)) {
               await Hive.readFile(fullPath, "image");
-            } else {
-              // Hive.log(`Skipping unsupported file: ${fullPath}`);
             }
-          } catch (error) {
-            console.error(`Error processing file ${fullPath}: ${error}`);
-          }
+          } catch (error) { }
         }
         Hive.saveToDisk();
     } catch (err) {
@@ -478,7 +530,6 @@ class Hive {
       if (Hive.documents.image.includes(ext)) {
           type = "image";
       } else if (!Hive.documents.text.includes(ext)) {
-          Hive.log(`Unsupported file type for update: ${filePath}`);
           return;
       }
 
@@ -487,7 +538,7 @@ class Hive {
         const extracted = await doc2txt.extractTextFromFile(filePath);
         input = extracted.text;
       } else {
-          input = filePath; // For images, input is the path
+          input = filePath; 
       }
 
       let result;
@@ -542,17 +593,14 @@ class Hive {
 
       watcher
         .on("add", async (filePath) => {
-          Hive.log(`Checking File: ${filePath}`);
           if (!(await Hive.fileExistsInDatabase(filePath))) {
              await Hive.updateFile(filePath);
           }
         })
         .on("change", async (filePath) => {
-          Hive.log(`File changed: ${filePath}`);
           await Hive.updateFile(filePath);
         })
         .on("unlink", async (filePath) => {
-          Hive.log(`File removed: ${filePath}`);
           Hive.removeFile(filePath);
           Hive.saveToDisk();
         });
@@ -581,7 +629,6 @@ class Hive {
           const sliceLength = endIndex - startIndex;
           if (sliceLength >= Hive.minSliceSize) {
             const slice = tokens.slice(startIndex, endIndex).join(" ");
-            Hive.log(`Slice: ${slice.substring(0, 50)}...`, len, Hive.minSliceSize, startIndex, endIndex);
             await Hive.addItem(slice, filePath, type);
           }
           startIndex = endIndex;
@@ -609,11 +656,14 @@ class Hive {
       return Array.isArray(vectorData) ? vectorData : Array.from(vectorData);
   }
 
+  /**
+   * UPDATED: Relaxed Regex for Scientific Data
+   * Preserves numbers, dots, hyphens, and percent signs.
+   */
   static escapeChars(text) {
     return (
       text
-        .replace(/\b(?:TEY|FY|AFRL\s+\d+|[0-9]{2,})\b/g, "")
-        .replace(/[^A-Za-z0-9\s]/g, " ")
+        .replace(/[^A-Za-z0-9\s.\-%]/g, " ") // Allow scientific notation parts
         .replace(/\s+/g, " ")
         .replace(/\b([A-Za-z])\b(\s+\1)+/g, "")
         .replace(/\b[A-Za-z]\b/g, "")
