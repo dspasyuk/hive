@@ -6,28 +6,56 @@ import WordExtractor from 'word-extractor';
 import { readPdfText } from 'pdf-text-reader';
 import * as pdfjsLib from 'pdfjs-dist';
 import { fileURLToPath } from 'url';
-
 import { createCanvas, ImageData } from 'canvas';
+// ==================================================================
+// 🔧 POLYFILL: Fix for "Promise.withResolvers is not a function"
+// ==================================================================
+if (typeof Promise.withResolvers === "undefined") {
+  Promise.withResolvers = function () {
+    let resolve, reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+}
+
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const standardFontDataUrl = path.join(__dirname, 'node_modules/pdfjs-dist/standard_fonts/');
 
+// ------------------------------------------------------------------
+// HELPER: Timeout Wrapper
+// Prevents any single operation (text or image) from hanging forever
+// ------------------------------------------------------------------
+const runWithTimeout = (promise, ms, label = "Operation") => {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timeoutId);
+  });
+};
+
 async function rgbaToPngBase64(image) {
   const { width, height, data } = image;
+  // Safety check for empty or zero-size images
+  if (width === 0 || height === 0 || !data) return null;
 
   let rgba;
   if (data.length === width * height * 3) {
-    // RGB → RGBA
     rgba = new Uint8ClampedArray(width * height * 4);
     for (let i = 0, j = 0; i < data.length; i += 3, j += 4) {
-      rgba[j] = data[i];       // R
-      rgba[j + 1] = data[i+1]; // G
-      rgba[j + 2] = data[i+2]; // B
-      rgba[j + 3] = 255;       // A
+      rgba[j] = data[i]; rgba[j + 1] = data[i+1]; rgba[j + 2] = data[i+2]; rgba[j + 3] = 255;
     }
   } else if (data.length === width * height) {
-    // Grayscale → RGBA
     rgba = new Uint8ClampedArray(width * height * 4);
     for (let i = 0, j = 0; i < data.length; i++, j += 4) {
       const val = data[i];
@@ -35,7 +63,6 @@ async function rgbaToPngBase64(image) {
       rgba[j+3] = 255;
     }
   } else {
-    // Already RGBA
     rgba = new Uint8ClampedArray(data);
   }
 
@@ -47,12 +74,10 @@ async function rgbaToPngBase64(image) {
   return canvas.toDataURL('image/png');
 }
 
-// Set the workerSrc property to the correct worker path
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdfjs-dist/build/pdf.worker.mjs';
 
 const doc2txt = {};
 
-// Read text from a .txt file
 doc2txt.readTextFromTxt = async function (filePath) {
   try {
     return await fs.readFile(filePath, 'utf8');
@@ -62,321 +87,234 @@ doc2txt.readTextFromTxt = async function (filePath) {
   }
 };
 
-// Extract metadata from PDF (new function)
 doc2txt.extractPdfMetadata = async function(pdfUrl) {
   try {
-    const loadingTask = pdfjsLib.getDocument({
-      url: pdfUrl,
-      standardFontDataUrl: standardFontDataUrl,
-    });
-    const pdf = await loadingTask.promise;
-    
-    const metadata = await pdf.getMetadata();
-    const outline = await pdf.getOutline();
-    
-    // Get page-level metadata for first few pages
-    const pageMetadata = [];
-    const pagesToSample = Math.min(5, pdf.numPages); // Sample first 5 pages
-    
-    for (let i = 1; i <= pagesToSample; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1.0 });
-      
-      pageMetadata.push({
-        pageNumber: i,
-        width: viewport.width,
-        height: viewport.height,
-        rotation: viewport.rotation
+    // Wrap metadata extraction in a 10s timeout
+    return await runWithTimeout(async () => {
+      const loadingTask = pdfjsLib.getDocument({
+        url: pdfUrl,
+        standardFontDataUrl: standardFontDataUrl,
+        verbosity: 0 // Suppress warnings
       });
-    }
-    return {
-      numPages: pdf.numPages,
-      fingerprints: pdf.fingerprints,
-      metadata: {
-        title: metadata.info?.Title || null,
-        author: metadata.info?.Author || null,
-        subject: metadata.info?.Subject || null,
-        keywords: metadata.info?.Keywords || null,
-        creator: metadata.info?.Creator || null,
-        producer: metadata.info?.Producer || null,
-        creationDate: metadata.info?.CreationDate || null,
-        modificationDate: metadata.info?.ModDate || null,
-        pdfVersion: metadata.info?.PDFFormatVersion || null,
-        encrypted: metadata.info?.IsAcroFormPresent || false,
-        linearized: metadata.info?.IsLinearized || false,
-        pageLayout: metadata.info?.PageLayout || null,
-        pageMode: metadata.info?.PageMode || null,
-      },
-      outline: outline,
-      pageMetadata: pageMetadata,
-      rawMetadata: metadata.metadata?.getAll ? metadata.metadata.getAll() : null
-    };
+      const pdf = await loadingTask.promise;
+      
+      const metadata = await pdf.getMetadata();
+      const outline = await pdf.getOutline(); // This can sometimes be heavy
+      
+      const pageMetadata = [];
+      const pagesToSample = Math.min(3, pdf.numPages); // Reduced sample size for speed
+      
+      for (let i = 1; i <= pagesToSample; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.0 });
+        pageMetadata.push({
+          pageNumber: i,
+          width: viewport.width,
+          height: viewport.height,
+        });
+        // Cleanup page resources immediately
+        page.cleanup(); 
+      }
+      return {
+        numPages: pdf.numPages,
+        metadata: metadata.info || {},
+        outline: outline,
+        pageMetadata: pageMetadata
+      };
+    }, 10000, "Metadata Extraction");
   } catch (err) {
-    console.error("Error extracting PDF metadata:", err.message);
+    console.warn(`Skipping metadata for ${path.basename(pdfUrl)}: ${err.message}`);
     return null;
   }
 };
 
-// Keep original function for backward compatibility
-doc2txt.extractImagesFromPdf = async function(pdfUrl) {
-  try {
-    const loadingTask = pdfjsLib.getDocument({
-      url: pdfUrl,
-      standardFontDataUrl: standardFontDataUrl,
-    });
-    const pdf = await loadingTask.promise;
-    const extractedImages = [];
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const operatorList = await page.getOperatorList();
-      const processingPromises = [];
-
-      for (let j = 0; j < operatorList.fnArray.length; j++) {
-        const fn = operatorList.fnArray[j];
-        const args = operatorList.argsArray[j];
-        
-        if (
-          fn === pdfjsLib.OPS.paintJpegXObject ||
-          fn === pdfjsLib.OPS.paintImageXObject ||
-          fn === pdfjsLib.OPS.paintImageXObjectMask
-        ) {
-          const imgName = args[0];
-          
-          const promise = new Promise((resolve) => {
-            page.objs.get(imgName, async (image) => {
-              if (image && image.data) {
-                let base64String;
-                try {
-                  if (image.kind === pdfjsLib.ImageKind.JPEG) {
-                    const buffer = Buffer.from(image.data);
-                    base64String = 'data:image/jpeg;base64,' + buffer.toString('base64');
-                  } else {
-                    base64String = await rgbaToPngBase64(image);
-                  }
-                  
-                  if (base64String) {
-                    extractedImages.push({
-                      base64: base64String,
-                      width: image.width,
-                      height: image.height
-                    });
-                  }
-                } catch (e) {
-                  console.error(`Error processing image ${imgName}:`, e.message);
-                }
-              }
-              resolve();
-            });
-          });
-          processingPromises.push(promise);
-        }
-      }
-
-      await Promise.all(processingPromises);
-    }
-
-    return extractedImages;
-  } catch (err) {
-    console.error("Error extracting images from PDF:", err.message);
-    return [];
-  }
-};
-
-// New function with enhanced metadata
+// ------------------------------------------------------------------
+// FIXED: Robust Image Extraction
+// ------------------------------------------------------------------
 doc2txt.extractImagesWithMetadataFromPdf = async function(pdfUrl) {
   try {
-    const loadingTask = pdfjsLib.getDocument({
-      url: pdfUrl,
-      standardFontDataUrl: standardFontDataUrl,
-    });
-    const pdf = await loadingTask.promise;
-    const imageData = [];
+    // 60 Second timeout for ALL images in a file
+    return await runWithTimeout(async () => {
+      const loadingTask = pdfjsLib.getDocument({
+        url: pdfUrl,
+        standardFontDataUrl: standardFontDataUrl,
+        verbosity: 0
+      });
+      const pdf = await loadingTask.promise;
+      const imageData = [];
+      
+      // Limit to first 20 pages to prevent OOM on massive reports
+      const maxPages = Math.min(pdf.numPages, 20); 
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const operatorList = await page.getOperatorList();
-      const processingPromises = [];
+      for (let i = 1; i <= maxPages; i++) {
+        try {
+          const page = await pdf.getPage(i);
+          const operatorList = await page.getOperatorList();
+          
+          // CRITICAL: If a page is too complex (e.g., >5000 ops = vector graph), skip it
+          if (operatorList.fnArray.length > 5000) {
+            console.warn(`Skipping images on page ${i} (Too complex/Vector Graph)`);
+            page.cleanup();
+            continue;
+          }
 
-      for (let j = 0; j < operatorList.fnArray.length; j++) {
-        const fn = operatorList.fnArray[j];
-        const args = operatorList.argsArray[j];
-        if (
-          fn === pdfjsLib.OPS.paintJpegXObject ||
-          fn === pdfjsLib.OPS.paintImageXObject ||
-          fn === pdfjsLib.OPS.paintImageXObjectMask
-        ) {
-          const imgName = args[0];
-          const promise = new Promise((resolve) => {
-            page.objs.get(imgName, async (image) => {
-              if (image && image.data) {
-                let base64String;
+          const processingPromises = [];
+
+          for (let j = 0; j < operatorList.fnArray.length; j++) {
+            const fn = operatorList.fnArray[j];
+            const args = operatorList.argsArray[j];
+            
+            if (
+              fn === pdfjsLib.OPS.paintJpegXObject ||
+              fn === pdfjsLib.OPS.paintImageXObject ||
+              fn === pdfjsLib.OPS.paintImageXObjectMask
+            ) {
+              const imgName = args[0];
+              
+              // CRITICAL FIX: Ensure Promise ALWAYS resolves
+              const promise = new Promise((resolve) => {
                 try {
-                  if (image.kind === pdfjsLib.ImageKind.JPEG) {
-                    const buffer = Buffer.from(image.data);
-                    base64String = 'data:image/jpeg;base64,' + buffer.toString('base64');
-                  } else {
-                    base64String = await rgbaToPngBase64(image);
-                  }
-                  if (base64String) {
-                    imageData.push({
-                      pageNumber: i,
-                      imageName: imgName,
-                      base64: base64String,
-                      width: image.width,
-                      height: image.height,
-                      kind: image.kind
-                    });
-                  }
+                  page.objs.get(imgName, async (image) => {
+                    if (image && image.data) {
+                      try {
+                        let base64String;
+                        if (image.kind === pdfjsLib.ImageKind.JPEG) {
+                          const buffer = Buffer.from(image.data);
+                          base64String = 'data:image/jpeg;base64,' + buffer.toString('base64');
+                        } else {
+                          base64String = await rgbaToPngBase64(image);
+                        }
+                        if (base64String) {
+                          imageData.push({
+                            pageNumber: i,
+                            imageName: imgName,
+                            base64: base64String,
+                            width: image.width,
+                            height: image.height
+                          });
+                        }
+                      } catch (e) {
+                         // ignore conversion error
+                      }
+                    }
+                    resolve(); // Always resolve
+                  });
                 } catch (e) {
-                  console.error(`Error processing image ${imgName}:`, e.message);
+                  resolve(); // Resolve if objs.get fails synchronously
                 }
-              }
-              resolve();
-            });
-          });
-          processingPromises.push(promise);
+              });
+              processingPromises.push(promise);
+            }
+          }
+
+          await Promise.all(processingPromises);
+          page.cleanup(); // Free memory
+        } catch (pageErr) {
+          console.warn(`Error on page ${i}: ${pageErr.message}`);
         }
       }
+      return imageData;
+    }, 60000, "Image Extraction"); // 60s hard limit
 
-      await Promise.all(processingPromises);
-    }
-
-    return imageData;
   } catch (err) {
-    console.error("Error extracting images with metadata from PDF:", err.message);
+    console.warn(`Image extraction timed out or failed: ${err.message}`);
     return [];
   }
 };
 
-// Read text from a .doc file
 doc2txt.readTextFromDoc = async function (filePath) {
   try {
     const extractor = new WordExtractor();
     return (await extractor.extract(filePath)).getBody();
   } catch (err) {
-    console.error("Error reading .doc file:", err.message);
     return "";
   }
 };
 
-// Read text from a .docx file
 doc2txt.readTextFromDocx = async function (filePath) {
   try {
     const zip = await JSZip.loadAsync(await fs.readFile(filePath));
     const xmlFile = await zip.file('word/document.xml').async('string');
-
     const result = await parseStringPromise(xmlFile);
     const body = result?.['w:document']?.['w:body'];
-    if (!body || !Array.isArray(body)) {
-      console.warn("Invalid DOCX structure: 'w:body' element is missing or malformed.");
-      return "";
-    }
+    if (!body || !Array.isArray(body)) return "";
 
-    // Extract text by handling multiple nested levels in the XML structure
     let text = body[0]['w:p']?.map(paragraph => {
       return paragraph['w:r']?.map(run => {
-        // Extract text if present and ensure it's a string
         const content = run['w:t'];
         if (Array.isArray(content)) {
-          return content.map(textRun => textRun._).join(''); // Join multiple text runs
+          return content.map(textRun => textRun._).join('');
         } else if (content && content._) {
-          return content._; // Single text run
+          return content._;
         } else {
-          return ''; // No text content
+          return '';
         }
-      }).filter(Boolean).join(' '); // Remove empty strings and join text in run
-    }).filter(Boolean).join('\n') || ''; // Remove empty strings in paragraph and join text
+      }).filter(Boolean).join(' ');
+    }).filter(Boolean).join('\n') || '';
     return text.trim();
   } catch (err) {
-    console.error("Error reading DOCX file:", err.message);
     return "";
   }
 };
 
-// Enhanced PDF reading with metadata and warning suppression
+// ------------------------------------------------------------------
+// FIXED: Main PDF Reader
+// ------------------------------------------------------------------
 doc2txt.readTextFromPdf = async function (filePath, options = {}) {
+  // Use a default object to populate results
+  const result = { text: "", images: [], metadata: null };
+
+  // 1. Extract Text (Max 30 seconds)
   try {
-    // Extract text from the PDF (suppress warnings from readPdfText too)
-    let text = "";
-    try {
-      text = await readPdfText({ url: filePath, verbosity: 0 });
-    } catch (textErr) {
-      console.error("Error extracting text from PDF:", textErr.message);
-      // Continue with empty text, try to get images and metadata
-    }
-    
-    // Extract images from the same PDF (choose format based on options)
-    let images = [];
-    try {
-      images = options.includeImageMetadata 
-        ? await this.extractImagesWithMetadataFromPdf(filePath)
-        : await this.extractImagesFromPdf(filePath);
-    } catch (imgErr) {
-      console.error("Error extracting images from PDF:", imgErr.message);
-      // Continue with empty images
-    }
-
-    // Extract metadata from the PDF
-    let metadata = null;
-    try {
-      metadata = await this.extractPdfMetadata(filePath);
-    } catch (metaErr) {
-      console.error("Error extracting metadata from PDF:", metaErr.message);
-      // Continue with null metadata
-    }
-
-    // Return an object containing text, images, and metadata
-    return {
-      text: text,
-      images: images,
-      metadata: metadata
-    };
-  } catch (err) {
-    console.error("Error reading PDF file:", err.message);
-    return { text: "", images: [], metadata: null };
+    result.text = await runWithTimeout(
+      readPdfText({ url: filePath, verbosity: 0 }), 
+      30000, 
+      "Text Extraction"
+    );
+    console.log(result.text)
+  } catch (e) {
+    console.error(`❌ Text extraction ERROR for ${path.basename(filePath)}:`, e);
   }
+
+  // 2. Extract Images (Max 60 seconds) - Run sequentially, not parallel to save RAM
+  try {
+    if (options.includeImageMetadata) {
+        result.images = await doc2txt.extractImagesWithMetadataFromPdf(filePath);
+    } 
+    // You can add the fallback for extractImagesFromPdf here if you still use it
+  } catch (e) {
+    console.error(`  ⚠️ Image extraction failed/timeout: ${path.basename(filePath)}`);
+  }
+
+  // 3. Extract Metadata (Max 5 seconds)
+  try {
+    result.metadata = await doc2txt.extractPdfMetadata(filePath);
+  } catch (e) {
+    // Ignore metadata failure
+  }
+
+  return result;
 };
 
-// Extract text from a file based on its extension (updated to include metadata)
 doc2txt.extractTextFromFile = async function (filePath) {
   const extension = path.extname(filePath).toLowerCase();
   try {
     switch (extension) {
-      case '.txt':
-      case '.py':
-      case '.js':
-      case '.sh':
-      case '.md':
-      case '.csv':
-      case '.json':
-        return {
-          text: await this.readTextFromTxt(filePath),
-          images: [],
-          metadata: null
-        };
+      case '.txt': case '.py': case '.js': case '.sh': case '.md': case '.csv': case '.json':
+        return { text: await this.readTextFromTxt(filePath), images: [], metadata: null };
       case '.doc':
-        return {
-          text: await this.readTextFromDoc(filePath),
-          images: [],
-          metadata: null
-        };
+        return { text: await this.readTextFromDoc(filePath), images: [], metadata: null };
       case '.docx':
-        return {
-          text: await this.readTextFromDocx(filePath),
-          images: [],
-          metadata: null
-        };
+        return { text: await this.readTextFromDocx(filePath), images: [], metadata: null };
       case '.pdf':
-        // The readTextFromPdf function now returns text, images, and metadata
-        // with warnings suppressed
-        return await this.readTextFromPdf(filePath);
+        // NOTE: We now default to including metadata/images. 
+        // Pass options if you want to toggle this behavior.
+        return await this.readTextFromPdf(filePath, { includeImageMetadata: true });
       default:
-        console.warn(`Unsupported file format: ${extension}`);
         return { text: "", images: [], metadata: null };
     }
   } catch (err) {
-    console.error("Error extracting text from file:", err.message);
+    console.error(`Critical error on file ${path.basename(filePath)}: ${err.message}`);
     return { text: "", images: [], metadata: null };
   }
 };
