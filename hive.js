@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { pipeline } from "@xenova/transformers";
 import fs from "fs";
 import path from "path";
