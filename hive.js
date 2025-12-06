@@ -625,6 +625,7 @@ class Hive {
 
   static async readFile(filePath, type) {
     try {
+      Hive.log(`Processing: ${path.basename(filePath)}`);
       if (type === "text") {
         let { text } = await doc2txt.extractTextFromFile(filePath);
         const [tokens, len] = Hive.tokenCount(text);
