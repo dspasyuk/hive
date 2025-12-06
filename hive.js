@@ -28,7 +28,7 @@ class Hive {
   static type = "text"; 
   static watch = false;
   static logging = false;
-  
+  static overlap = 0; // Default overlap
   // NEW: Reranking Configuration
   static useRerank = false;
 
@@ -80,7 +80,14 @@ class Hive {
     if (options.models) {
         Hive.models = { ...Hive.models, ...options.models };
     }
-
+    
+    // Handle overlap option
+    if (options.overlap !== undefined) {
+      Hive.overlap = options.overlap;
+    } else {
+      // Default to 5% if not specified
+      Hive.overlap = Math.floor(Hive.SliceSize * 0.05);
+    }
     Hive.createCollection(Hive.dbName);
     await Hive.loadToMemory();
     await Hive.initTransformers();
@@ -621,19 +628,39 @@ class Hive {
       if (type === "text") {
         let { text } = await doc2txt.extractTextFromFile(filePath);
         const [tokens, len] = Hive.tokenCount(text);
-        let startIndex = 0;
-        
-        while (startIndex < len) {
-          let endIndex = startIndex + Hive.SliceSize;
-          endIndex = Math.min(endIndex, len);
+          let startIndex = 0;
           
-          const sliceLength = endIndex - startIndex;
-          if (sliceLength >= Hive.minSliceSize) {
-            const slice = tokens.slice(startIndex, endIndex).join(" ");
-            await Hive.addItem(slice, filePath, type);
+          // Calculate overlap in tokens
+          let overlapTokens = 0;
+          if (Hive.overlap < 1 && Hive.overlap > 0) {
+             // Percentage
+             overlapTokens = Math.floor(Hive.SliceSize * Hive.overlap);
+          } else {
+             // Absolute token count
+             overlapTokens = Math.floor(Hive.overlap);
           }
-          startIndex = endIndex;
-        }
+
+          // Ensure overlap is not greater than SliceSize (prevent infinite loop)
+          if (overlapTokens >= Hive.SliceSize) {
+             overlapTokens = Hive.SliceSize - 1; 
+          }
+
+          while (startIndex < len) {
+            let endIndex = startIndex + Hive.SliceSize;
+            endIndex = Math.min(endIndex, len);
+
+            const sliceLength = endIndex - startIndex;
+            if (sliceLength >= Hive.minSliceSize) {
+              const slice = tokens.slice(startIndex, endIndex).join(" ");
+              await Hive.addItem(slice, filePath, type);
+            }
+            
+            // Move start index by stride (SliceSize - overlap)
+            // If we reached the end, break
+            if (endIndex === len) break;
+            
+            startIndex += (Hive.SliceSize - overlapTokens);
+          }
       } else if (type === "image") {
         await Hive.addItem("", filePath, type);
       }
@@ -641,6 +668,7 @@ class Hive {
       console.error(`Error reading file ${filePath}:`, error);
     }
   }
+
 
   /**
    * Embed input using the specified type

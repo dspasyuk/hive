@@ -68,24 +68,6 @@ When you first initialize Hive with a `pathToDocs`, it will:
 2.  Process text files into chunks and images into embeddings.
 3.  Create and save a vector database at the specified location.
 
-## Using Custom Models
-
-You can override the default models by passing a `models` object in the `init` options. This is useful if you want to use a different model for text, image, or reranking.
-
-```javascript
-import Hive from '@deonis/hive';
-
-await Hive.init({
-  dbName: "MyDocuments",
-  models: {
-    text: "Xenova/all-MiniLM-L6-v2", // Custom text model
-    image: "Xenova/clip-vit-base-patch16", // Custom image model
-    rerank: "Xenova/bge-reranker-base" // Custom rerank model
-  },
-  rerank: true // Enable reranking
-});
-```
-
 ## API Reference
 
 ### `Hive.init(options)`
@@ -99,16 +81,12 @@ Initializes the Hive database with the specified configuration.
     -   `pathToDocs` (String | Boolean): The path to the directory containing your documents. If `false`, no documents will be processed automatically. **Default**: `false`.
     -   `watch` (Boolean): Enable file watching for auto-updates. **Default**: `false`.
     -   `logging` (Boolean): Enable console logging for file processing. **Default**: `false`.
-    -   `rerank` (Boolean): Enable reranking of search results. **Default**: `false`.
     -   `SliceSize` (Number): Token limit for text slicing. **Default**: `512`.
     -   `minSliceSize` (Number): Minimum token count for a slice to be indexed. **Default**: `100`.
+    -   `overlap` (Number): Overlap between chunks. Can be a percentage (< 1) or token count (>= 1). **Default**: `5%` of `SliceSize`.
     -   `documents` (Object): An object specifying the file extensions to process.
         -   `text` (Array): **Default**: `[".txt", ".doc", ".docx", ".pdf"]`.
         -   `image` (Array): **Default**: `[".png", ".jpg", ".jpeg"]`.
-    -   `models` (Object): An object specifying the models to use for text, image, and reranking.
-        -   `text` (String): The name of the text model to use.
-        -   `image` (String): The name of the image model to use.
-        -   `rerank` (String): The name of the rerank model to use.
 
 ### `Hive.embed(input, type)`
 
