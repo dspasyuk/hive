@@ -146,6 +146,34 @@ Legacy method to generate a vector. Returns an object wrapper around the vector 
 -   `options` (Object): Optional parameters.
 -   **Returns**: `{ data: Array }`
 
+## Python Support
+
+Hive can now be used in Python applications using the `hive.py` wrapper!
+
+### Prerequisites
+
+-   Ensure Node.js is installed and in your system PATH.
+-   Install Hive dependencies: `npm install` (in the hive directory).
+
+### Usage
+
+```python
+from hive import Hive
+
+# Initialize
+with Hive() as hive:
+    hive.init({"dbName": "MyDocuments"})
+
+    # Add a file
+    hive.add_file("./notes.txt")
+
+    # Search
+    vector = hive.embed("search query")
+    results = hive.find(vector)
+    
+    print(results)
+```
+
 ## Performance
 
 Hive is optimized to handle large datasets. A search in a database with **30,000 entries** takes approximately **30ms** on an AMD Ryzen 7 3700X 8-Core Processor.
