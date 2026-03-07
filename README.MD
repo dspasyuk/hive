@@ -10,7 +10,7 @@
 - **Vector Search**: Perform similarity searches using vector embeddings (Text-to-Text, Image-to-Image).
 - **Automatic Processing**: Automatically detects file types and generates appropriate embeddings.
 - **File Support**: Supports `.txt`, `.doc`, `.docx`, `.pdf` for text, and `.png`, `.jpg`, `.jpeg` for images.
-- **Persistence**: Offers both in-memory and on-disk persistence for your data.
+- **Persistence**: Offers both in-memory and heavily optimized on-disk binary `.bin` persistence containing serialized `msgpackr` Float32 arrays for blazing-fast database initialization.
 - **Configurable Storage**: Store your database anywhere, defaulting to your project root.
 - **Customizable**: Easily extendable to support other file types and embedding models.
 
@@ -77,7 +77,7 @@ Initializes the Hive database with the specified configuration.
 -   `options` (Object): Configuration options.
     -   `dbName` (String): The name of the database. **Default**: `"Documents"`.
     -   `storageDir` (String): Directory to store the database folder. **Default**: `process.cwd()` (Project Root).
-    -   `pathToDB` (String): Full path to the database file (overrides `storageDir`).
+    -   `pathToDB` (String): Full path to the database file, should ideally end in `.bin` (overrides `storageDir`). Note: Legacy `.json` files will be automatically migrated to `.bin` format upon loading.
     -   `pathToDocs` (String | Boolean): The path to the directory containing your documents. If `false`, no documents will be processed automatically. **Default**: `false`.
     -   `watch` (Boolean): Enable file watching for auto-updates. **Default**: `false`.
     -   `logging` (Boolean): Enable console logging for file processing. **Default**: `false`.

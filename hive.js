@@ -5,6 +5,7 @@ import path from "path";
 import doc2txt from "./doc2txt.js";
 import { fileURLToPath } from "url";
 import readline from "readline";
+import { Packr, UnpackrStream } from "msgpackr";
 
 /**
  * Copyright Denis Spasyuk
@@ -23,7 +24,7 @@ class Hive {
 
   // Default configuration
   static dbName = "Documents";
-  static pathToDB = path.join(process.cwd(), "db", "Documents", "Documents.json");
+  static pathToDB = path.join(process.cwd(), "db", "Documents", "Documents.bin");
   static pathToDocs = false;
   static type = "text"; 
   static watch = false;
@@ -58,11 +59,11 @@ class Hive {
     Hive.dbName = options.dbName || Hive.dbName;
     
     if (options.pathToDB) {
-      Hive.pathToDB = options.pathToDB;
+      Hive.pathToDB = options.pathToDB.endsWith('.json') ? options.pathToDB.replace(/\.json$/, '.bin') : options.pathToDB;
     } else if (options.storageDir) {
-      Hive.pathToDB = path.join(options.storageDir, Hive.dbName, Hive.dbName + ".json");
+      Hive.pathToDB = path.join(options.storageDir, Hive.dbName, Hive.dbName + ".bin");
     } else {
-      Hive.pathToDB = path.join(process.cwd(), "db", Hive.dbName, Hive.dbName + ".json");
+      Hive.pathToDB = path.join(process.cwd(), "db", Hive.dbName, Hive.dbName + ".bin");
     }
 
     Hive.pathToDocs = options.pathToDocs !== undefined ? options.pathToDocs : Hive.pathToDocs;
@@ -254,17 +255,17 @@ class Hive {
           let error = null;
           fileStream.on('error', (err) => { error = err; });
 
+          const packr = new Packr({ structuredClone: true });
           for (const [key, value] of Hive.collections.entries()) {
             for (const entry of value) {
                 const record = {
                     collection: key,
                     id: entry.id,
-                    vector: Array.from(entry.vector),
+                    vector: entry.vector,
                     meta: entry.meta,
                     magnitude: entry.magnitude
                 };
-                const line = JSON.stringify(record) + '\n';
-                if (!fileStream.write(line)) {
+                if (!fileStream.write(packr.pack(record))) {
                     await new Promise(resolve => fileStream.once('drain', resolve));
                 }
             }
@@ -293,59 +294,126 @@ class Hive {
   }
 
   static async loadToMemory() {
-    if (fs.existsSync(Hive.pathToDB) && (Hive.collections.size === 0 || Hive.collections.get(Hive.dbName)?.length === 0)) {
+    let loadPath = Hive.pathToDB;
+
+    // Track if we loaded from a legacy file
+    let loadedFromLegacy = false;
+    let legacyFilePath = null;
+
+    if (!fs.existsSync(loadPath)) {
+        if (loadPath.endsWith('.bin')) {
+            const legacyPath = loadPath.replace(/\.bin$/, '.json');
+            if (fs.existsSync(legacyPath)) {
+                loadPath = legacyPath;
+                legacyFilePath = legacyPath;
+                loadedFromLegacy = true;
+                Hive.log(`No .bin database found. Falling back to legacy JSON at ${legacyPath}`);
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+
+    if (Hive.collections.size === 0 || Hive.collections.get(Hive.dbName)?.length === 0) {
       try {
         Hive.collections.clear();
-        const fileStream = fs.createReadStream(Hive.pathToDB);
-        const rl = readline.createInterface({
-            input: fileStream,
-            crlfDelay: Infinity
-        });
 
-        for await (const line of rl) {
-            if (!line.trim()) continue;
-            try {
-                // Try parsing as NDJSON record
-                const record = JSON.parse(line);
-                
-                // Check if it's the legacy format (whole file is one JSON object)
-                // Legacy format: { "Documents": [...] }
-                if (record && !record.collection && !record.vector && typeof record === 'object') {
-                     // It's likely the legacy format loaded as a single line (if minified) 
-                     // or we need to handle it differently. 
-                     // But since we are rebuilding, let's assume NDJSON or try to extract.
-                     for (const [dbName, entries] of Object.entries(record)) {
-                        Hive.createCollection(dbName);
-                        const collection = Hive.collections.get(dbName);
-                        for (const entry of entries) {
-                            collection.push({
-                                vector: new Float32Array(entry.vector),
-                                meta: entry.meta,
-                                magnitude: entry.magnitude,
-                                id: entry.id,
-                            });
-                        }
-                     }
-                     continue;
+        let isJson = loadPath.endsWith('.json');
+        if (fs.existsSync(loadPath)) {
+            const fd = fs.openSync(loadPath, 'r');
+            const buf = Buffer.alloc(1);
+            if (fs.readSync(fd, buf, 0, 1, null) > 0) {
+                if (buf[0] >= 0x80) {
+                    isJson = false;
                 }
+            }
+            fs.closeSync(fd);
+        }
 
-                // NDJSON format
-                if (record.collection) {
-                    if (!Hive.collections.has(record.collection)) {
-                        Hive.createCollection(record.collection);
+        const fileStream = fs.createReadStream(loadPath);
+
+        if (isJson) {
+            const rl = readline.createInterface({
+                input: fileStream,
+                crlfDelay: Infinity
+            });
+
+            for await (const line of rl) {
+                if (!line.trim()) continue;
+                try {
+                    const record = JSON.parse(line);
+                    
+                    if (record && !record.collection && !record.vector && typeof record === 'object') {
+                         for (const [dbName, entries] of Object.entries(record)) {
+                            Hive.createCollection(dbName);
+                            const collection = Hive.collections.get(dbName);
+                            for (const entry of entries) {
+                                collection.push({
+                                    vector: new Float32Array(entry.vector),
+                                    meta: entry.meta,
+                                    magnitude: entry.magnitude,
+                                    id: entry.id,
+                                });
+                            }
+                         }
+                         continue;
                     }
-                    Hive.collections.get(record.collection).push({
-                        vector: new Float32Array(record.vector),
-                        meta: record.meta,
-                        magnitude: record.magnitude,
-                        id: record.id,
-                    });
+
+                    if (record.collection) {
+                        if (!Hive.collections.has(record.collection)) {
+                            Hive.createCollection(record.collection);
+                        }
+                        Hive.collections.get(record.collection).push({
+                            vector: new Float32Array(record.vector),
+                            meta: record.meta,
+                            magnitude: record.magnitude,
+                            id: record.id,
+                        });
+                    }
+                } catch (e) {
+                    console.warn("Skipping invalid line in DB:", e.message);
                 }
-            } catch (e) {
-                console.warn("Skipping invalid line in DB:", e.message);
+            }
+        } else {
+            const unpacker = new UnpackrStream({ structuredClone: true });
+            fileStream.pipe(unpacker);
+            
+            for await (const record of unpacker) {
+                try {
+                    if (record.collection) {
+                        if (!Hive.collections.has(record.collection)) {
+                            Hive.createCollection(record.collection);
+                        }
+                        Hive.collections.get(record.collection).push({
+                            vector: record.vector instanceof Float32Array ? record.vector : new Float32Array(record.vector),
+                            meta: record.meta,
+                            magnitude: record.magnitude,
+                            id: record.id,
+                        });
+                    }
+                } catch (e) {
+                    console.warn("Skipping invalid entry in DB:", e.message);
+                }
             }
         }
-        Hive.log(`Database loaded into memory from ${Hive.pathToDB}`);
+        
+        Hive.log(`Database loaded into memory from ${loadPath}`);
+
+        if (loadedFromLegacy && legacyFilePath) {
+            Hive.log(`Initiating automatic migration of legacy JSON database to msgpackr binary format.`);
+            // Force a save to disk to create the .bin file immediately
+            Hive.saveToDisk();
+            
+            // Rename the old json file to .bak to avoid confusion
+            try {
+                fs.renameSync(legacyFilePath, legacyFilePath + ".bak");
+                Hive.log(`Renamed legacy database to ${legacyFilePath}.bak`);
+            } catch (e) {
+                console.warn("Could not rename legacy database file:", e.message);
+            }
+        }
       } catch (error) {
         console.error("Error loading database:", error);
       }
