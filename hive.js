@@ -30,6 +30,7 @@ class Hive {
   static watch = false;
   static logging = false;
   static overlap = 0; // Default overlap
+  static escapechar = false;
   // NEW: Reranking Configuration
   static useRerank = false;
 
@@ -76,6 +77,8 @@ class Hive {
 
     // NEW: Enable Re-ranking
     Hive.useRerank = options.rerank !== undefined ? options.rerank : false;
+
+    Hive.escapechar = options.escapechar !== undefined ? options.escapechar : Hive.escapechar;
 
     // NEW: Allow custom models
     if (options.models) {
@@ -759,6 +762,8 @@ class Hive {
    * Preserves numbers, dots, hyphens, and percent signs.
    */
   static escapeChars(text) {
+    if (!Hive.escapechar) return text;
+
     return (
       text
         .replace(/[^A-Za-z0-9\s.\-%]/g, " ") // Allow scientific notation parts
