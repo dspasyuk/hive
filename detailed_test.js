@@ -57,17 +57,16 @@ const TEST_DB_DIR = path.join(process.cwd(), "test_db_temp");
 const TEST_DB_PATH = path.join(TEST_DB_DIR, "TestDB.json");
 
 function cleanup() {
-    if (fs.existsSync(TEST_DB_PATH)) {
-        fs.unlinkSync(TEST_DB_PATH);
-    }
     if (fs.existsSync(TEST_DB_DIR)) {
-        fs.rmdirSync(TEST_DB_DIR);
+        fs.rmSync(TEST_DB_DIR, { recursive: true, force: true });
     }
 }
 
 // Ensure the Hive instance is clean before each test block
 function resetHive() {
     Hive.collections.clear();
+    Hive.users.clear();
+    Hive.currentUser = null;
     Hive.pipeline = null;
     Hive.dbName = "TestDB";
     Hive.pathToDB = TEST_DB_PATH;
@@ -171,6 +170,157 @@ async function testQueryAndLogic() {
     await timeFunction("Hive.escapeChars", Hive.escapeChars, dirtyText);
 }
 
+async function testAuthAndPermissions() {
+    console.log("\n## 4. Authentication & Access Control Tests");
+
+    // 4.1 Backward compatible: no users = no auth required
+    console.log("\n4.1 No users configured - operations proceed without auth");
+    resetHive();
+    Hive.createCollection();
+    Hive.insertOne({ vector: [1, 0], meta: { test: true } });
+    const findResult = await Hive.find([1, 0], 5);
+    console.assert(findResult.length > 0, "find should work without auth");
+    console.log("   ✓ insert/find work without users configured");
+
+    // 4.2 Bootstrap: create first user (no auth needed when no users exist)
+    console.log("\n4.2 Bootstrap - create first user without auth");
+    resetHive();
+    Hive.createCollection();
+    Hive.createUser({ user: "admin", pwd: "admin123", roles: ["dbOwner"] });
+    console.assert(Hive.users.size === 1, "should have 1 user");
+    console.log("   ✓ first user created without auth");
+
+    // 4.3 Operations blocked without auth when users exist
+    console.log("\n4.3 Operations blocked without auth when users exist");
+    try {
+        Hive.insertOne({ vector: [1, 0], meta: {} });
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("Not authenticated"), "wrong error: " + e.message);
+        console.log("   ✓ insert blocked without auth");
+    }
+    try {
+        await Hive.find([1, 0], 5);
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("Not authenticated"), "wrong error: " + e.message);
+        console.log("   ✓ find blocked without auth");
+    }
+
+    // 4.4 Authentication with wrong password
+    console.log("\n4.4 Authentication with wrong password");
+    try {
+        Hive.auth("admin", "wrongpass");
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("Invalid credentials"), "wrong error: " + e.message);
+        console.log("   ✓ wrong password rejected");
+    }
+
+    // 4.5 Authentication with correct password
+    console.log("\n4.5 Authentication with correct password");
+    Hive.auth("admin", "admin123");
+    console.assert(Hive.whoAmI() === "admin", "whoAmI should return admin");
+    console.log("   ✓ authenticated as admin");
+
+    // 4.6 Admin can perform all operations
+    console.log("\n4.6 Admin can perform all operations");
+    Hive.insertOne({ vector: [1, 0], meta: { title: "admin test" } });
+    const adminFind = await Hive.find([1, 0], 5);
+    console.assert(adminFind.length > 0, "admin should be able to find");
+    console.log("   ✓ admin insert/find works");
+
+    // 4.7 Create users with different roles
+    console.log("\n4.7 Create users with different roles");
+    Hive.createUser({ user: "reader", pwd: "read123", roles: ["read"] });
+    Hive.createUser({ user: "writer", pwd: "write123", roles: ["readWrite"] });
+    Hive.createUser({ user: "dba", pwd: "dba123", roles: ["dbAdmin"] });
+    console.assert(Hive.users.size === 4, "should have 4 users");
+    console.log("   ✓ 3 additional users created");
+
+    // 4.8 getUsers requires admin
+    console.log("\n4.8 getUsers requires admin privilege");
+    const userList = Hive.getUsers();
+    console.assert(userList.length === 4, "should list 4 users");
+    console.log("   ✓ admin can list users");
+
+    // 4.9 Test read-only role
+    console.log("\n4.9 Read-only role restrictions");
+    Hive.auth("reader", "read123");
+    console.assert(Hive.whoAmI() === "reader", "whoAmI should return reader");
+    const readerFind = await Hive.find([1, 0], 5);
+    console.assert(readerFind.length > 0, "reader should be able to find");
+    console.log("   ✓ reader can find");
+    try {
+        Hive.insertOne({ vector: [2, 0], meta: {} });
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("not authorized"), "wrong error: " + e.message);
+        console.log("   ✓ reader cannot insert");
+    }
+    try {
+        Hive.deleteOne("some-id");
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("not authorized"), "wrong error: " + e.message);
+        console.log("   ✓ reader cannot delete");
+    }
+
+    // 4.10 Test readWrite role
+    console.log("\n4.10 ReadWrite role permissions");
+    Hive.auth("writer", "write123");
+    Hive.insertOne({ vector: [3, 0], meta: { title: "writer test" } });
+    console.log("   ✓ writer can insert");
+    const writerFind = await Hive.find([3, 0], 5);
+    console.assert(writerFind.length > 0, "writer should be able to find");
+    console.log("   ✓ writer can find");
+    try {
+        Hive.createUser({ user: "extra", pwd: "pass", roles: ["read"] });
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("not authorized"), "wrong error: " + e.message);
+        console.log("   ✓ writer cannot create users (admin only)");
+    }
+
+    // 4.11 Test dbAdmin role
+    console.log("\n4.11 dbAdmin role can manage users");
+    Hive.auth("dba", "dba123");
+    Hive.getUsers();
+    console.log("   ✓ dbAdmin can list users");
+    Hive.createUser({ user: "extra", pwd: "pass", roles: ["read"] });
+    console.assert(Hive.users.has("extra"), "extra user should exist");
+    console.log("   ✓ dbAdmin can create users");
+    try {
+        Hive.insertOne({ vector: [4, 0], meta: {} });
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("not authorized"), "wrong error: " + e.message);
+        console.log("   ✓ dbAdmin cannot insert data");
+    }
+
+    // 4.12 Logout and whoAmI
+    console.log("\n4.12 Logout functionality");
+    Hive.logout();
+    console.assert(Hive.whoAmI() === null, "whoAmI should return null after logout");
+    console.log("   ✓ logout clears current user");
+
+    // 4.13 dropUser
+    console.log("\n4.13 dropUser (re-authenticate as admin first)");
+    Hive.auth("admin", "admin123");
+    Hive.dropUser("extra");
+    console.assert(!Hive.users.has("extra"), "extra user should be deleted");
+    console.log("   ✓ user dropped successfully");
+    try {
+        Hive.dropUser("admin");
+        console.assert(false, "should have thrown");
+    } catch (e) {
+        console.assert(e.message.includes("Cannot delete yourself"), "wrong error: " + e.message);
+        console.log("   ✓ cannot delete yourself");
+    }
+
+    console.log("\n   ✓ All auth & permissions tests passed");
+}
+
 // --- Main Test Execution ---
 
 async function runTests() {
@@ -179,6 +329,7 @@ async function runTests() {
         await testInitAndEmbedding();
         await testDiskOperations();
         await testQueryAndLogic();
+        await testAuthAndPermissions();
     } catch (e) {
         console.error("\n💥 A critical error occurred during testing!");
         console.error(e);

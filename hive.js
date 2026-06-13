@@ -6,6 +6,7 @@ import doc2txt from "./doc2txt.js";
 import { fileURLToPath } from "url";
 import readline from "readline";
 import { Packr, UnpackrStream } from "msgpackr";
+import crypto from "crypto";
 
 /**
  * Copyright Denis Spasyuk
@@ -34,6 +35,16 @@ class Hive {
   // NEW: Reranking Configuration
   static useRerank = false;
 
+
+  static users = new Map();
+  static currentUser = null;
+  static roleActions = {
+    root: new Set(["*"]),
+    dbOwner: new Set(["*"]),
+    readWrite: new Set(["find", "insert", "update", "delete", "embed"]),
+    read: new Set(["find", "embed"]),
+    dbAdmin: new Set(["admin"])
+  };
 
   static documents = {
     text: [".txt", ".doc", ".docx", ".pdf"],
@@ -94,6 +105,24 @@ class Hive {
     }
     Hive.createCollection(Hive.dbName);
     await Hive.loadToMemory();
+
+    if (options.permissions && options.permissions.users) {
+      for (const [username, config] of Object.entries(options.permissions.users)) {
+        if (!Hive.users.has(username)) {
+          const salt = Hive.generateSalt();
+          const password = Hive.hashPassword(config.password, salt);
+          Hive.users.set(username, {
+            password,
+            salt,
+            roles: config.roles || ["read"]
+          });
+        }
+      }
+      if (options.permissions.autoAuth) {
+        Hive.auth(options.permissions.autoAuth, options.permissions.users[options.permissions.autoAuth]?.password);
+      }
+    }
+
     await Hive.initTransformers();
 
     if (Hive.pathToDocs) {
@@ -177,11 +206,98 @@ class Hive {
     }
   }
 
+  static hashPassword(password, salt) {
+    return crypto.createHash("sha256").update(salt + password).digest("hex");
+  }
+
+  static generateSalt() {
+    return crypto.randomBytes(16).toString("hex");
+  }
+
+  static auth(username, password) {
+    if (!Hive.users.has(username)) {
+      throw new Error(`User "${username}" not found`);
+    }
+    const user = Hive.users.get(username);
+    const hash = Hive.hashPassword(password, user.salt);
+    if (hash !== user.password) {
+      throw new Error("Invalid credentials");
+    }
+    Hive.currentUser = username;
+    Hive.log(`User "${username}" authenticated`);
+    return true;
+  }
+
+  static logout() {
+    Hive.currentUser = null;
+    Hive.log("User logged out");
+  }
+
+  static whoAmI() {
+    return Hive.currentUser;
+  }
+
+  static checkAuth(action) {
+    if (Hive.users.size === 0) return;
+    if (!Hive.currentUser) {
+      throw new Error("Not authenticated. Call Hive.auth(username, password) first.");
+    }
+    const user = Hive.users.get(Hive.currentUser);
+    if (!user) {
+      throw new Error(`Current user "${Hive.currentUser}" not found`);
+    }
+    for (const role of user.roles) {
+      const actions = Hive.roleActions[role];
+      if (!actions) continue;
+      if (actions.has("*") || actions.has(action)) {
+        return;
+      }
+    }
+    throw new Error(`User "${Hive.currentUser}" is not authorized to perform "${action}"`);
+  }
+
+  static createUser({ user, pwd, roles = ["read"] }) {
+    Hive.checkAuth("admin");
+    if (Hive.users.has(user)) {
+      throw new Error(`User "${user}" already exists`);
+    }
+    const salt = Hive.generateSalt();
+    const password = Hive.hashPassword(pwd, salt);
+    Hive.users.set(user, { password, salt, roles });
+    Hive.saveToDisk();
+    Hive.log(`User "${user}" created with roles: ${roles.join(", ")}`);
+    return true;
+  }
+
+  static dropUser(username) {
+    Hive.checkAuth("admin");
+    if (!Hive.users.has(username)) {
+      throw new Error(`User "${username}" not found`);
+    }
+    if (Hive.currentUser === username) {
+      throw new Error("Cannot delete yourself");
+    }
+    Hive.users.delete(username);
+    Hive.saveToDisk();
+    Hive.log(`User "${username}" dropped`);
+    return true;
+  }
+
+  static getUsers() {
+    Hive.checkAuth("admin");
+    const result = [];
+    for (const [username, data] of Hive.users) {
+      result.push({ user: username, roles: data.roles });
+    }
+    return result;
+  }
+
   static randomId() {
     return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
   }
 
   static deleteOne(id) {
+    Hive.checkAuth("delete");
     if (Hive.collections.has(Hive.dbName)) {
       const collection = Hive.collections.get(Hive.dbName);
       const filteredCollection = collection.filter((item) => item.id !== id);
@@ -191,6 +307,7 @@ class Hive {
   }
 
   static insertOne(entry) {
+    Hive.checkAuth("insert");
     if (Hive.collections.has(Hive.dbName)) {
       const { vector, meta } = entry;
       const magnitude = Hive.normalize(vector);
@@ -206,6 +323,7 @@ class Hive {
   }
 
   static updateOne(query, entry) {
+    Hive.checkAuth("update");
     if (Hive.collections.has(Hive.dbName)) {
       Hive.findMeta(query, entry);
       Hive.saveToDisk();
@@ -213,6 +331,7 @@ class Hive {
   }
 
   static insertMany(entries) {
+    Hive.checkAuth("insert");
     if (Hive.collections.has(Hive.dbName)) {
       const collection = Hive.collections.get(Hive.dbName);
       for (let i = 0; i < entries.length; i++) {
@@ -259,6 +378,22 @@ class Hive {
           fileStream.on('error', (err) => { error = err; });
 
           const packr = new Packr({ structuredClone: true });
+
+          if (Hive.users.size > 0) {
+            const usersData = {};
+            for (const [username, data] of Hive.users.entries()) {
+              usersData[username] = data;
+            }
+            const record = {
+              collection: "__hive__",
+              _type: "users",
+              data: usersData
+            };
+            if (!fileStream.write(packr.pack(record))) {
+              await new Promise(resolve => fileStream.once('drain', resolve));
+            }
+          }
+
           for (const [key, value] of Hive.collections.entries()) {
             for (const entry of value) {
                 const record = {
@@ -417,6 +552,19 @@ class Hive {
                 console.warn("Could not rename legacy database file:", e.message);
             }
         }
+
+        if (Hive.collections.has("__hive__")) {
+          const systemEntries = Hive.collections.get("__hive__");
+          for (const entry of systemEntries) {
+            if (entry._type === "users" && entry.data) {
+              Hive.users.clear();
+              for (const [username, data] of Object.entries(entry.data)) {
+                Hive.users.set(username, data);
+              }
+            }
+          }
+          Hive.collections.delete("__hive__");
+        }
       } catch (error) {
         console.error("Error loading database:", error);
       }
@@ -443,6 +591,7 @@ class Hive {
    * @returns {Array}
    */
   static async find(queryInput, topK = 10) {
+    Hive.checkAuth("find");
     let queryVector = queryInput;
     let queryText = "";
     
@@ -526,6 +675,7 @@ class Hive {
   }
 
   static async addFile(filePath, filename) {
+    Hive.checkAuth("insert");
     try {
       const ext = path.extname(filePath).toLowerCase();
       if (Hive.documents.text.includes(ext)) {
@@ -648,6 +798,7 @@ class Hive {
   }
 
   static removeFile(filePath) {
+    Hive.checkAuth("delete");
     const collection = Hive.collections.get(Hive.dbName);
     if (collection) {
       Hive.collections.set(
@@ -689,6 +840,7 @@ class Hive {
   }
 
   static fileExistsInDatabase(filePath) {
+    Hive.checkAuth("find");
     const collection = Hive.collections.get(Hive.dbName);
     if (!collection) return false;
     return collection.some((item) => item.meta.filePath === filePath);
@@ -749,6 +901,7 @@ class Hive {
    * @returns {Promise<Array>}
    */
   static async embed(input, type = "text") {
+      Hive.checkAuth("embed");
       if (!Hive.pipelines[type]) {
           await Hive.initTransformers();
       }

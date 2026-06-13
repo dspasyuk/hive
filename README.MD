@@ -13,6 +13,7 @@
 - **Persistence**: Offers both in-memory and heavily optimized on-disk binary `.bin` persistence containing serialized `msgpackr` Float32 arrays for blazing-fast database initialization.
 - **Configurable Storage**: Store your database anywhere, defaulting to your project root.
 - **Customizable**: Easily extendable to support other file types and embedding models.
+- **Authentication & Access Control**: MongoDB-like role-based access control with user management, password hashing, and configurable permissions per database.
 
 ## Installation
 
@@ -68,6 +69,60 @@ When you first initialize Hive with a `pathToDocs`, it will:
 2.  Process text files into chunks and images into embeddings.
 3.  Create and save a vector database at the specified location.
 
+## Authentication & Access Control
+
+Hive supports MongoDB-like role-based access control. Configure users and their permissions to restrict database operations.
+
+### Built-in Roles
+
+| Role | Actions | Description |
+|------|---------|-------------|
+| `root` | All actions (`*`) | Full access to everything |
+| `dbOwner` | All actions (`*`) | Full access to the database |
+| `readWrite` | `find`, `insert`, `update`, `delete`, `embed` | Read and write data |
+| `read` | `find`, `embed` | Read-only access |
+| `dbAdmin` | `admin` | User management and database administration |
+
+### Quick Start with Auth
+
+```javascript
+import Hive from '@deonis/hive';
+
+// Initialize with users (bootstrap)
+await Hive.init({
+  dbName: "MyDB",
+  permissions: {
+    users: {
+      admin: { password: "secret", roles: ["dbOwner"] },
+      viewer: { password: "view123", roles: ["read"] }
+    },
+    autoAuth: "admin" // Auto-authenticate after init
+  }
+});
+
+// Or create users programmatically (allowed when no users exist)
+Hive.createUser({ user: "admin", pwd: "secret", roles: ["dbOwner"] });
+
+// Authenticate
+Hive.auth("admin", "secret");
+Hive.whoAmI(); // "admin"
+
+// Operations check permissions automatically
+await Hive.find(query, 10); // ✓ allowed for all roles
+Hive.insertOne(entry);      // ✓ allowed for admin/readWrite/dbOwner/root
+
+// Login as a read-only user
+Hive.auth("viewer", "view123");
+Hive.insertOne(entry);      // ✗ throws: not authorized
+```
+
+### Auth Behavior
+
+- **No users configured**: All operations proceed without authentication (backward compatible).
+- **Users configured**: Every database operation checks that the current user has the required role/action.
+- **Bootstrap**: When no users exist, `createUser()` is allowed without authentication so you can create your first admin.
+- **Persistence**: Users and roles are stored in the `.bin` database file and restored on reload.
+
 ## API Reference
 
 ### `Hive.init(options)`
@@ -87,6 +142,11 @@ Initializes the Hive database with the specified configuration.
     -   `documents` (Object): An object specifying the file extensions to process.
         -   `text` (Array): **Default**: `[".txt", ".doc", ".docx", ".pdf"]`.
         -   `image` (Array): **Default**: `[".png", ".jpg", ".jpeg"]`.
+    -   `permissions` (Object): Authentication configuration.
+        -   `users` (Object): A map of username to user config.
+            -   `password` (String): Plain-text password (hashed with SHA-256 + salt on init).
+            -   `roles` (Array): Roles to assign (e.g., `["dbOwner"]`, `["read"]`).
+        -   `autoAuth` (String): Username to auto-authenticate after init.
 
 ### `Hive.embed(input, type)`
 
@@ -134,6 +194,45 @@ Updates an existing document in the database.
 
 -   `query` (Object): A query to find the document to update (e.g., `{ filePath: "/path/to/doc.txt" }`).
     -   `entry` (Object): The new document entry.
+
+### `Hive.auth(username, password)`
+
+Authenticates a user for the current session.
+
+-   `username` (String): The username.
+-   `password` (String): The password.
+-   **Throws**: If the user doesn't exist or password is incorrect.
+
+### `Hive.logout()`
+
+Clears the current authenticated user.
+
+### `Hive.whoAmI()`
+
+Returns the username of the currently authenticated user, or `null`.
+
+-   **Returns**: `String | null`
+
+### `Hive.createUser({ user, pwd, roles })`
+
+Creates a new user. Requires `admin` privilege unless no users exist (bootstrap).
+
+-   `user` (String): Username.
+-   `pwd` (String): Password.
+-   `roles` (Array): Roles to assign. **Default**: `["read"]`.
+
+### `Hive.dropUser(username)`
+
+Deletes a user. Requires `admin` privilege.
+
+-   `username` (String): Username to delete.
+-   **Throws**: If trying to delete yourself.
+
+### `Hive.getUsers()`
+
+Lists all users with their roles. Requires `admin` privilege.
+
+-   **Returns**: `Array<{ user: String, roles: Array }>`
 
 ### Deprecated
 
