@@ -1,7 +1,7 @@
 {
   "name": "@deonis/hive",
   "version": "1.3.12",
-  "description": "![Hive](./img/hive.png)",
+  "description": "Lightweight file-based multimodal vector database and semantic search engine for Node.js with MCP server support",
   "main": "hive.js",
   "bin": {
     "hive": "./hive.js",
