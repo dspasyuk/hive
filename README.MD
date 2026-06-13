@@ -141,18 +141,22 @@ node mcp.js
 
 `hive_init` · `hive_find` · `hive_insert_one` · `hive_insert_many` · `hive_delete_one` · `hive_update_one` · `hive_add_file` · `hive_remove_file` · `hive_embed` · `hive_auth` · `hive_whoami` · `hive_logout` · `hive_create_user` · `hive_drop_user` · `hive_get_users`
 
-### Cursor / Claude Desktop Setup
+### AI Client Setup
+
+Add to your MCP client config (Cursor, Claude Desktop, opencode, etc.):
 
 ```json
 {
   "mcpServers": {
     "hive": {
       "command": "node",
-      "args": ["path/to/hive/mcp.js"]
+      "args": ["/path/to/hive/mcp.js"]
     }
   }
 }
 ```
+
+In **opencode**, use the `hive` skill or configure it in your `opencode.json`:
 
 ## Performance
 
