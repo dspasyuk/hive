@@ -273,6 +273,53 @@ with Hive() as hive:
     print(results)
 ```
 
+## MCP Server
+
+Hive includes an MCP (Model Context Protocol) server for AI agent integration. It exposes Hive's vector database as tools that AI agents can call.
+
+### Usage
+
+Configure your AI assistant's MCP client to run:
+
+```bash
+node mcp.js
+```
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `hive_init` | Initialize the database |
+| `hive_find` | Vector similarity search |
+| `hive_insert_one` | Insert a document |
+| `hive_insert_many` | Bulk insert documents |
+| `hive_delete_one` | Delete a document by ID |
+| `hive_update_one` | Update a document |
+| `hive_add_file` | Add a file (auto-detect text/image) |
+| `hive_remove_file` | Remove file entries |
+| `hive_embed` | Generate a vector embedding |
+| `hive_auth` | Authenticate a user |
+| `hive_whoami` | Get current user |
+| `hive_logout` | Logout |
+| `hive_create_user` | Create a database user |
+| `hive_drop_user` | Delete a user |
+| `hive_get_users` | List users with roles |
+
+### Cursor / Claude Desktop Setup
+
+Add to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "hive": {
+      "command": "node",
+      "args": ["path/to/hive/mcp.js"]
+    }
+  }
+}
+```
+
 ## Performance
 
 Hive is optimized to handle large datasets. A search in a database with **30,000 entries** takes approximately **30ms** on an AMD Ryzen 7 3700X 8-Core Processor.
