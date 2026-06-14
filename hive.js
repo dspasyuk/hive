@@ -22,7 +22,6 @@ class Hive {
   static pipelines = {};
   static saveTimeout = null;
   static isSaving = false;
-  static sessionActive = false;
 
   // Default configuration
   static dbName = "Documents";
@@ -72,7 +71,13 @@ class Hive {
     Hive.dbName = options.dbName || Hive.dbName;
     
     if (options.pathToDB) {
-      Hive.pathToDB = options.pathToDB.endsWith('.json') ? options.pathToDB.replace(/\.json$/, '.bin') : options.pathToDB;
+      const ext = path.extname(options.pathToDB);
+      if (!ext) {
+        Hive.pathToDB = path.join(options.pathToDB, Hive.dbName, Hive.dbName + ".bin");
+        Hive.log(`pathToDB "${options.pathToDB}" is a directory, storing at ${Hive.pathToDB}`);
+      } else {
+        Hive.pathToDB = options.pathToDB.endsWith('.json') ? options.pathToDB.replace(/\.json$/, '.bin') : options.pathToDB;
+      }
     } else if (options.storageDir) {
       Hive.pathToDB = path.join(options.storageDir, Hive.dbName, Hive.dbName + ".bin");
     } else {
@@ -234,37 +239,6 @@ class Hive {
     Hive.log("User logged out");
   }
 
-  static beginSession() {
-    Hive.checkAuth("insert");
-    if (Hive.sessionActive) {
-      throw new Error("Session already active");
-    }
-    Hive.sessionActive = true;
-    Hive.log("Session started");
-  }
-
-  static async commitSession() {
-    Hive.checkAuth("insert");
-    if (!Hive.sessionActive) {
-      throw new Error("No active session");
-    }
-    Hive.sessionActive = false;
-    await Hive.saveToDisk();
-    Hive.log("Session committed");
-  }
-
-  static async rollbackSession() {
-    Hive.checkAuth("insert");
-    if (!Hive.sessionActive) {
-      throw new Error("No active session");
-    }
-    Hive.sessionActive = false;
-    Hive.collections.clear();
-    Hive.users.clear();
-    await Hive.loadToMemory();
-    Hive.log("Session rolled back");
-  }
-
   static whoAmI() {
     return Hive.currentUser;
   }
@@ -389,10 +363,6 @@ class Hive {
   }
 
   static saveToDisk() {
-    if (Hive.sessionActive) {
-      Hive.log("Session active — deferring save");
-      return Promise.resolve();
-    }
     return new Promise((resolve, reject) => {
       if (Hive.saveTimeout) {
         clearTimeout(Hive.saveTimeout);
