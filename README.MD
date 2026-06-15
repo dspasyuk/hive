@@ -133,9 +133,16 @@ Requires Node.js in PATH and `npm install` in the hive directory.
 
 Hive includes an MCP server for AI agent integration. All Hive operations are exposed as tools.
 
-```bash
-node mcp.js
-```
+Configure with environment variables for auto-initialization on startup:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HIVE_STORAGE_DIR` | — | Directory to store the database (required for auto-init) |
+| `HIVE_DB_NAME` | `Documents` | Database name |
+| `HIVE_DOCS_DIR` | — | Directory to auto-import documents from |
+| `HIVE_WATCH` | `false` | Watch docs directory for changes |
+| `HIVE_LOGGING` | `false` | Enable processing logs |
+| `HIVE_RERANK` | `false` | Enable cross-encoder reranking |
 
 ### Tools
 
@@ -143,7 +150,7 @@ node mcp.js
 
 ### AI Client Setup
 
-Add to your MCP client config (Cursor, Claude Desktop, opencode, etc.):
+Minimal (call `hive_init` manually):
 
 ```json
 {
@@ -156,7 +163,47 @@ Add to your MCP client config (Cursor, Claude Desktop, opencode, etc.):
 }
 ```
 
-In **opencode**, use the `hive` skill or configure it in your `opencode.json`:
+With auto-init (DB ready on startup):
+
+```json
+{
+  "mcpServers": {
+    "hive": {
+      "command": "node",
+      "args": ["/path/to/hive/mcp.js"],
+      "env": {
+        "HIVE_STORAGE_DIR": "/path/to/data",
+        "HIVE_DB_NAME": "Knowledge",
+        "HIVE_DOCS_DIR": "/path/to/documents",
+        "HIVE_LOGGING": "true"
+      }
+    }
+  }
+}
+```
+
+### opencode Configuration
+
+In `~/.config/opencode/opencode.json` or project `opencode.json`:
+
+```json
+{
+  "mcp": {
+    "hive": {
+      "type": "local",
+      "command": ["node", "/path/to/hive/mcp.js"],
+      "enabled": true,
+      "environment": {
+        "HIVE_STORAGE_DIR": "/path/to/data",
+        "HIVE_DB_NAME": "Knowledge",
+        "HIVE_LOGGING": "true"
+      }
+    }
+  }
+}
+```
+
+Hive tools are then automatically available to the AI agent as a knowledge source.
 
 ## Performance
 

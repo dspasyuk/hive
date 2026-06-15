@@ -215,21 +215,6 @@ const TOOLS = [
     name: "hive_get_users",
     description: "List all users with roles (requires admin)",
     inputSchema: { type: "object", properties: {} }
-  },
-  {
-    name: "hive_begin_session",
-    description: "Start a transaction session — defers disk saves until commit or rollback",
-    inputSchema: { type: "object", properties: {} }
-  },
-  {
-    name: "hive_commit_session",
-    description: "Commit the current session — flush all pending changes to disk",
-    inputSchema: { type: "object", properties: {} }
-  },
-  {
-    name: "hive_rollback_session",
-    description: "Rollback the current session — discard in-memory changes and reload from disk",
-    inputSchema: { type: "object", properties: {} }
   }
 ];
 
@@ -322,18 +307,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const users = Hive.getUsers();
         return ok({ users });
       }
-      case "hive_begin_session": {
-        Hive.beginSession();
-        return ok({ message: "Session started — disk saves deferred" });
-      }
-      case "hive_commit_session": {
-        await Hive.commitSession();
-        return ok({ message: "Session committed — all changes saved to disk" });
-      }
-      case "hive_rollback_session": {
-        await Hive.rollbackSession();
-        return ok({ message: "Session rolled back — in-memory state reverted from disk" });
-      }
       default:
         return err(`Unknown tool: ${name}`);
     }
@@ -343,6 +316,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
+  const storageDir = process.env.HIVE_STORAGE_DIR;
+  const dbName = process.env.HIVE_DB_NAME || "Documents";
+  const docsDir = process.env.HIVE_DOCS_DIR;
+  const watch = process.env.HIVE_WATCH === "true";
+  const logging = process.env.HIVE_LOGGING === "true";
+  const rerank = process.env.HIVE_RERANK === "true";
+
+  if (storageDir) {
+    await Hive.init({
+      dbName,
+      storageDir,
+      pathToDocs: docsDir || undefined,
+      watch,
+      logging,
+      rerank
+    });
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
