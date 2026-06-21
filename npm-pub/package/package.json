@@ -1,0 +1,40 @@
+{
+  "name": "@deonis/hive",
+  "version": "1.4.0",
+  "description": "Lightweight file-based multimodal vector database and semantic search engine for Node.js with MCP server support",
+  "main": "hive.js",
+  "bin": {
+    "hive": "./hive.js",
+    "doc2txt": "./doc2txt.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "mcp": "node mcp.js"
+  },
+  "type": "module",
+  "author": "Denis Spasyuk",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xenova/transformers": "^2.17.2",
+    "canvas": "^3.2.0",
+    "chokidar": "^4.0.1",
+    "jszip": "^3.10.1",
+    "msgpackr": "^1.11.8",
+    "pdf-text-reader": "^5.1.0",
+    "word-extractor": "^1.0.4",
+    "xml2js": "^0.6.2"
+  },
+  "overrides": {
+    "protobufjs": "7.5.8",
+    "tar": "7.5.11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dspasyuk/hive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dspasyuk/hive/issues"
+  },
+  "homepage": "https://github.com/dspasyuk/hive#readme"
+}
