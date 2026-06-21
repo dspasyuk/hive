@@ -6,3 +6,10 @@ npm-pub/
 __pycache__/
 uploads/
 versions/
+debug/
+img/doc/
+test_db_mcp/
+tests/*.bak
+tests/reproduce_*
+tests/test_custom_models.js
+tests/test_hive_multimodal.js
