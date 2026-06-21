@@ -16,7 +16,6 @@
 - **Cross-encoder reranking** — Optional reranking pass for improved search quality
 - **Authentication & RBAC** — MongoDB-like role-based access control with hashed passwords
 - **MCP Server** — Expose Hive as tools for AI agents via the Model Context Protocol
-- **Python wrapper** — Use Hive from Python via `hive.py`
 - **Custom models** — Plug in any `@xenova/transformers` compatible model
 
 ## Installation
@@ -115,19 +114,6 @@ Hive.whoAmI(); // "admin"
 | `rerank` | `false` | Enable cross-encoder reranking |
 | `models` | — | Override embedding models (`{ text, image, rerank }`) |
 | `permissions` | — | Auth config: `{ users: { user: { password, roles } }, autoAuth }` |
-
-## Python Support
-
-```python
-from hive import Hive
-
-with Hive() as hive:
-    hive.init({"dbName": "MyDocuments"})
-    hive.add_file("./notes.txt")
-    results = hive.find("search query")
-```
-
-Requires Node.js in PATH and `npm install` in the hive directory.
 
 ## MCP Server
 
