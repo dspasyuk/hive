@@ -191,6 +191,32 @@ In `~/.config/opencode/opencode.json` or project `opencode.json`:
 
 Hive tools are then automatically available to the AI agent as a knowledge source.
 
+## Admin Web UI
+
+Hive includes a built-in admin web interface for browsing and managing databases through a visual dashboard.
+
+```bash
+node admin.js
+```
+
+Opens at `http://localhost:4173`. Features:
+
+- **Database browser** — View, create, and drop databases and collections
+- **Entry explorer** — Browse entries with search, type filtering, and pagination
+- **Semantic search** — Multi-modal text and image search with CLIP and bge embeddings
+- **Entry preview** — Inspect metadata, content, vector, and image previews
+- **User management** — Create, edit, and delete users with RBAC roles
+- **File upload** — Upload text and image files with automatic embedding
+- **Delete entries** — Bulk delete with multi-select
+
+### Search
+
+The search bar supports three modes: **All**, **Text**, and **Images**. The **Semantic** button performs vector similarity search using text embeddings (bge-base-en-v1.5) and CLIP text-to-image search, returning results sorted by relevance. Use the Images filter to get only image results from CLIP.
+
+### Screenshot
+
+![Admin Web UI](./admin.png)
+
 ## Performance
 
 ~30ms search in a database with **30,000 entries** on an AMD Ryzen 7 3700X.
