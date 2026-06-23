@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hive Admin</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; display: flex; min-height: 100vh; background: #f5f5f7; color: #1d1d1f; }
+.sidebar { width: 260px; height: 100vh; position: sticky; top: 0; background: #1d1d1f; color: #f5f5f7; padding: 20px; display: flex; flex-direction: column; }
+.sidebar h1 { font-size: 18px; font-weight: 600; margin-bottom: 20px; }
+.sidebar h1 small { font-size: 11px; opacity: .5; font-weight: 400; display: block; margin-top: 2px; }
+.db-list { flex: 1; overflow-y: auto; }
+.db-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; font-size: 14px; display: flex; justify-content: space-between; align-items: center; }
+.db-item:hover { background: rgba(255,255,255,.08); }
+.db-item.active { background: rgba(255,255,255,.12); }
+.db-item .name { font-weight: 500; }
+.db-item .badge { background: rgba(255,255,255,.15); padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+.db-item .size { font-size: 11px; opacity: .5; margin-top: 2px; }
+.sidebar .refresh { background: none; border: 1px solid rgba(255,255,255,.2); color: #f5f5f7; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; margin-top: 12px; width: 100%; }
+.sidebar .refresh:hover { background: rgba(255,255,255,.08); }
+.main { flex: 1; padding: 24px; overflow-y: auto; max-width: 1200px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid #d2d2d7; padding-bottom: 0; }
+.tab { padding: 8px 20px; cursor: pointer; border: none; background: none; font-size: 14px; color: #6e6e73; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab:hover { color: #1d1d1f; }
+.tab.active { color: #1d1d1f; border-bottom-color: #0071e3; font-weight: 500; }
+.panel { display: none; }
+.panel.active { display: block; }
+.card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; border: 1px solid #d2d2d7; }
+.card h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.stat { background: #f5f5f7; border-radius: 10px; padding: 16px; text-align: center; }
+.stat .value { font-size: 28px; font-weight: 700; color: #1d1d1f; }
+.stat .label { font-size: 12px; color: #6e6e73; margin-top: 4px; }
+.collection-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #e8e8ed; font-size: 14px; }
+.collection-row:last-child { border-bottom: none; }
+.collection-row .name { font-weight: 500; }
+.collection-row .meta { color: #6e6e73; font-size: 13px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 10px 12px; border-bottom: 1px solid #d2d2d7; color: #6e6e73; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+td { padding: 10px 12px; border-bottom: 1px solid #e8e8ed; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tr:hover td { background: #f5f5f7; }
+.entry-meta { font-size: 12px; color: #6e6e73; }
+.entry-content { font-size: 13px; line-height: 1.4; }
+.search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+.search-bar input { flex: 1; padding: 8px 14px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 14px; outline: none; }
+.search-bar input:focus { border-color: #0071e3; }
+.search-bar select { padding: 8px 14px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 14px; background: #fff; }
+.pagination { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 16px; font-size: 13px; color: #6e6e73; }
+.pagination button { background: #fff; border: 1px solid #d2d2d7; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.pagination button:hover { background: #f5f5f7; }
+.pagination button:disabled { opacity: .4; cursor: default; }
+.user-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #e8e8ed; }
+.user-row:last-child { border-bottom: none; }
+.user-row .name { font-weight: 500; }
+.user-row .roles { display: flex; gap: 4px; }
+.role-tag { background: #e8e8ed; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.btn { background: #0071e3; color: #fff; border: none; padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.btn:hover { background: #0077ed; }
+.btn-danger { background: #ff3b30; }
+.btn-danger:hover { background: #ff453a; }
+.btn-sm { padding: 4px 12px; font-size: 12px; }
+.form-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.form-row input, .form-row select { padding: 8px 12px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 13px; flex: 1; }
+.form-row select[multiple] { min-height: 80px; }
+.form-row label { font-size: 13px; min-width: 80px; color: #6e6e73; }
+.empty-state { text-align: center; padding: 40px; color: #6e6e73; }
+.empty-state h3 { margin-bottom: 8px; color: #1d1d1f; }
+.loading { text-align: center; padding: 40px; color: #6e6e73; }
+.db-select { display: none; }
+.db-select.show { display: block; }
+.vector-preview { font-family: monospace; font-size: 11px; color: #6e6e73; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 100; justify-content: center; align-items: center; }
+.modal-overlay.open { display: flex; }
+.modal { background: #fff; border-radius: 14px; width: 95%; max-width: 960px; max-height: 88vh; display: flex; flex-direction: column; box-shadow: 0 8px 40px rgba(0,0,0,.3); }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #d2d2d7; }
+.modal-header h3 { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #6e6e73; padding: 0 4px; }
+.modal-close:hover { color: #1d1d1f; }
+.modal-body { padding: 20px; overflow-y: auto; }
+.modal-body .field { margin-bottom: 14px; }
+.modal-body .field-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #6e6e73; margin-bottom: 4px; }
+.modal-body .field-value { font-size: 14px; line-height: 1.5; word-break: break-word; white-space: pre-wrap; }
+.modal-body .field-value.img-preview { max-height: 400px; display: flex; justify-content: center; background: #f5f5f7; border-radius: 8px; padding: 12px; }
+.modal-body .field-value.img-preview img { max-width: 100%; max-height: 380px; object-fit: contain; border-radius: 4px; }
+.modal-body .vec-values { font-family: monospace; font-size: 11px; color: #6e6e73; max-height: 120px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 2px 8px; }
+.search-mode { background:#fff; border:none; padding:6px 14px; font-size:13px; cursor:pointer; color:#6e6e73; }
+.search-mode:hover { background:#f5f5f7; }
+.search-mode.active { background:#0071e3; color:#fff; }
+.error { color: #ff3b30; padding: 8px 0; font-size: 13px; }
+.success { color: #30b158; padding: 8px 0; font-size: 13px; }
+@media (max-width: 768px) { .sidebar { width: 100%; position: fixed; bottom: 0; z-index: 10; flex-direction: row; padding: 10px; height: auto; } .sidebar h1 { display: none; } .db-list { display: flex; gap: 4px; } .db-item { white-space: nowrap; } .main { margin-bottom: 60px; } }
+</style>
+</head>
+<body>
+<div class="sidebar">
+  <h1>Hive Admin <small>Vector Database Manager</small></h1>
+  <div class="db-list" id="dbList"></div>
+  <button class="refresh" onclick="document.getElementById('fileInput').click()">Import .bin</button>
+  <input type="file" id="fileInput" accept=".bin" style="display:none" onchange="uploadDatabase(event)">
+  <button class="refresh" onclick="loadDatabases()" style="margin-top:4px">Refresh</button>
+  <button class="refresh" onclick="newDatabase()" style="margin-top:4px">+ New Database</button>
+</div>
+<div class="main" id="main">
+  <div class="empty-state" id="welcome">
+    <h3>Select a database</h3>
+    <p>Choose a database from the sidebar to browse its collections, entries, and users.</p>
+  </div>
+  <div id="dbView" style="display:none">
+    <div class="tabs">
+      <button class="tab active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
+      <button class="tab" data-tab="entries" onclick="switchTab('entries')">Entries</button>
+      <button class="tab" data-tab="users" onclick="switchTab('users')">Users</button>
+    </div>
+    <div class="panel active" id="panel-overview">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 id="dbTitle"></h2>
+          <button class="btn btn-danger btn-sm" onclick="dropDatabase()">Drop Database</button>
+        </div>
+        <div class="stat-grid" id="statGrid"></div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="margin:0">Collections</h2>
+          <button class="btn btn-sm" onclick="newCollection()">+ New</button>
+        </div>
+        <div id="collectionList"></div>
+      </div>
+    </div>
+    <div class="panel" id="panel-entries">
+      <div class="card">
+        <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+          <button class="btn btn-sm" onclick="document.getElementById('docInput').click()">+ Add Document</button>
+          <select id="uploadCollection" style="padding:6px 10px;border:1px solid #d2d2d7;border-radius:8px;font-size:13px;background:#fff">
+            <option value="">(default collection)</option>
+          </select>
+          <input type="file" id="docInput" accept=".txt,.doc,.docx,.pdf,.png,.jpg,.jpeg" style="display:none" multiple onchange="uploadDocuments(event)">
+          <span id="docMsg" style="font-size:13px;margin-left:4px"></span>
+        </div>
+        <div class="search-bar">
+          <input type="text" id="searchInput" placeholder="Search entries..." oninput="onSearchInput()">
+          <select id="collectionFilter" onchange="loadEntries()"><option value="">All collections</option></select>
+          <div style="display:flex;border:1px solid #d2d2d7;border-radius:8px;overflow:hidden">
+            <button class="search-mode active" data-mode="all" onclick="setSearchMode('all')">All</button>
+            <button class="search-mode" data-mode="text" onclick="setSearchMode('text')">Text</button>
+            <button class="search-mode" data-mode="image" onclick="setSearchMode('image')">Images</button>
+          </div>
+          <button class="btn btn-sm" id="semanticBtn" onclick="semanticSearch()" style="background:#34c759">Semantic</button>
+        </div>
+        <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
+          <span id="selectedCount" style="font-size:13px;color:#6e6e73">0 selected</span>
+          <button class="btn btn-sm btn-danger" id="deleteSelectedBtn" style="display:none" onclick="deleteSelected()">Delete Selected</button>
+        </div>
+        <table><thead><tr><th style="width:32px"><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"></th><th>ID</th><th>Title</th><th>Collection</th><th>Type</th><th>Vector</th><th>Preview</th></tr></thead><tbody id="entriesBody"></tbody></table>
+        <div id="entriesEmpty" class="empty-state" style="display:none"><h3>No entries found</h3></div>
+        <div class="pagination" id="pagination">
+          <button id="prevBtn" onclick="prevPage()">Previous</button>
+          <span id="pageInfo"></span>
+          <button id="nextBtn" onclick="nextPage()">Next</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel" id="panel-users">
+      <div class="card">
+        <h2>Users</h2>
+        <div id="userList"></div>
+      </div>
+      <div class="card">
+        <h2>Add User</h2>
+        <div class="form-row"><label>Username</label><input type="text" id="newUsername" placeholder="username"></div>
+        <div class="form-row"><label>Password</label><input type="password" id="newPassword" placeholder="password"></div>
+        <div class="form-row"><label>Roles</label><select id="newRoles" multiple><option value="read" selected>read</option><option value="readWrite">readWrite</option><option value="dbAdmin">dbAdmin</option><option value="dbOwner">dbOwner</option></select></div>
+        <button class="btn" onclick="addUser()">Create User</button>
+        <div id="userMessage"></div>
+      </div>
+    </div>
+  </div>
+  <div class="modal-overlay" id="previewModal" onclick="closePreview(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 id="previewTitle"></h3>
+        <button class="modal-close" onclick="closePreview()">&times;</button>
+      </div>
+      <div class="modal-body" id="previewBody"></div>
+    </div>
+  </div>
+</div>
+<script>
+let currentDb = null;
+let currentEntries = [];
+let currentOffset = 0;
+let currentTotal = 0;
+const PAGE_SIZE = 50;
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) { const e = await r.json().catch(() => ({error:r.statusText})); throw new Error(e.error || r.statusText); }
+  return r.json();
+}
+
+async function uploadDatabase(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const name = prompt('Database name:', file.name.replace(/\.bin$/, ''));
+  if (!name) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const base64 = reader.result.split(',')[1];
+    try {
+      await api('/api/databases/upload', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name, data: base64 })
+      });
+      await loadDatabases();
+    } catch (e) { alert('Upload failed: ' + e.message); }
+    event.target.value = '';
+  };
+  reader.readAsDataURL(file);
+}
+
+async function loadDatabases() {
+  const dbs = await api('/api/databases');
+  const list = document.getElementById('dbList');
+  list.innerHTML = dbs.map(d => `
+    <div class="db-item${currentDb === d.name ? ' active' : ''}" onclick="selectDb('${d.name}')">
+      <div><div class="name">${d.name}</div><div class="size">${formatSize(d.size)}</div></div>
+      <div class="badge">${formatTime(d.modified)}</div>
+    </div>
+  `).join('');
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/(1024*1024)).toFixed(1) + ' MB';
+}
+
+function formatTime(t) {
+  const d = new Date(t);
+  const now = new Date();
+  const diff = now - d;
+  if (diff < 60000) return 'now';
+  if (diff < 3600000) return Math.floor(diff/60000) + 'm';
+  if (diff < 86400000) return Math.floor(diff/3600000) + 'h';
+  return d.toLocaleDateString();
+}
+
+async function selectDb(name) {
+  currentDb = name;
+  currentOffset = 0;
+  document.getElementById('welcome').style.display = 'none';
+  document.getElementById('dbView').style.display = 'block';
+  document.querySelectorAll('.db-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.db-item').forEach(el => { if (el.textContent.includes(name)) el.classList.add('active'); });
+  switchTab('overview');
+  await loadOverview();
+  await loadCollections();
+  await loadUsers();
+}
+
+async function loadOverview() {
+  const db = await api('/api/databases/' + currentDb);
+  document.getElementById('dbTitle').textContent = currentDb;
+  document.getElementById('statGrid').innerHTML = `
+    <div class="stat"><div class="value">${db.collections.length}</div><div class="label">Collections</div></div>
+    <div class="stat"><div class="value">${db.collections.reduce((a,c) => a + c.count, 0)}</div><div class="label">Entries</div></div>
+    <div class="stat"><div class="value">${db.userCount}</div><div class="label">Users</div></div>
+  `;
+}
+
+async function loadCollections() {
+  const cols = await api('/api/databases/' + currentDb + '/collections');
+  const list = document.getElementById('collectionList');
+  const filter = document.getElementById('collectionFilter');
+  list.innerHTML = cols.length ? cols.map(c => `
+    <div class="collection-row">
+      <div class="name">${c.name}</div>
+      <div>
+        <span class="meta">${c.count} entries &middot; ${c.types.join(', ')}</span>
+        <button class="btn btn-sm btn-danger" onclick="dropCollection('${escHtml(c.name)}')" style="margin-left:8px">Drop</button>
+      </div>
+    </div>
+  `).join('') : '<div class="empty-state" style="padding:20px">No collections</div>';
+  filter.innerHTML = '<option value="">All collections</option>' + cols.map(c => `<option value="${c.name}">${c.name} (${c.count})</option>`).join('');
+  const upCol = document.getElementById('uploadCollection');
+  upCol.innerHTML = '<option value="">(default collection)</option>' + cols.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+}
+
+async function loadEntries() {
+  const search = document.getElementById('searchInput').value;
+  const collection = document.getElementById('collectionFilter').value;
+  let url = `/api/databases/${currentDb}/entries?limit=${PAGE_SIZE}&offset=${currentOffset}&search=${encodeURIComponent(search)}&collection=${encodeURIComponent(collection)}`;
+  if (searchMode !== 'all') url += '&type=' + searchMode;
+  const data = await api(url);
+  currentEntries = data.entries;
+  currentTotal = data.total;
+  const body = document.getElementById('entriesBody');
+  const empty = document.getElementById('entriesEmpty');
+  if (!data.entries.length) {
+    body.innerHTML = '';
+    empty.style.display = 'block';
+  } else {
+    empty.style.display = 'none';
+    body.innerHTML = data.entries.map(e => {
+      const vec = e.vector ? Array.from(e.vector) : [];
+      const preview = e.meta?.content ? e.meta.content.slice(0, 100) : '';
+      const idx = currentEntries.indexOf(e);
+      return `<tr style="cursor:pointer" onclick="openPreview(${idx})">
+        <td onclick="event.stopPropagation()"><input type="checkbox" class="entry-checkbox" value="${e.id}" onchange="updateSelected()"></td>
+        <td style="font-family:monospace;font-size:11px">${e.id ? e.id.slice(0,12) : '-'}</td>
+        <td><strong>${e.meta?.title || e.meta?.filePath || '-'}</strong></td>
+        <td>${e.collection || '-'}</td>
+        <td>${e.meta?.type || '-'}</td>
+        <td class="vector-preview">[${vec.slice(0,3).map(v => v.toFixed(2)).join(', ')}${vec.length > 3 ? '...' : ''}]</td>
+        <td class="entry-content">${escHtml(preview)}</td>
+      </tr>`;
+    }).join('');
+    document.getElementById('selectAll').checked = false;
+    updateSelected();
+  }
+  document.getElementById('pageInfo').textContent = `${data.offset + 1}-${Math.min(data.offset + data.entries.length, data.total)} of ${data.total}`;
+  document.getElementById('prevBtn').disabled = data.offset <= 0;
+  document.getElementById('nextBtn').disabled = data.offset + data.entries.length >= data.total;
+}
+
+function prevPage() { currentOffset = Math.max(0, currentOffset - PAGE_SIZE); loadEntries(); }
+function nextPage() { currentOffset += PAGE_SIZE; loadEntries(); }
+
+async function loadUsers() {
+  const users = await api('/api/databases/' + currentDb + '/users');
+  const list = document.getElementById('userList');
+  list.innerHTML = users.length ? users.map(u => `
+    <div class="user-row">
+      <div class="name">${u.user}</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="roles">${u.roles.map(r => `<span class="role-tag">${r}</span>`).join('')}</div>
+        <button class="btn btn-sm btn-danger" onclick="deleteUser('${u.user}')">Delete</button>
+      </div>
+    </div>
+  `).join('') : '<div class="empty-state" style="padding:20px">No users configured (all operations allowed)</div>';
+}
+
+async function addUser() {
+  const user = document.getElementById('newUsername').value.trim();
+  const password = document.getElementById('newPassword').value;
+  const roles = [...document.getElementById('newRoles').selectedOptions].map(o => o.value);
+  const msg = document.getElementById('userMessage');
+  if (!user || !password) { msg.className = 'error'; msg.textContent = 'Username and password required'; return; }
+  try {
+    await api('/api/databases/' + currentDb + '/users', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ user, password, roles })
+    });
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newPassword').value = '';
+    msg.className = 'success';
+    msg.textContent = 'User created';
+    await loadUsers();
+    await loadOverview();
+  } catch (e) { msg.className = 'error'; msg.textContent = e.message; }
+}
+
+async function deleteUser(username) {
+  if (!confirm('Delete user "' + username + '"?')) return;
+  try {
+    await api('/api/databases/' + currentDb + '/users/' + username, { method: 'DELETE' });
+    await loadUsers();
+    await loadOverview();
+  } catch (e) { alert(e.message); }
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+  if (name === 'entries') loadEntries();
+}
+
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+async function semanticSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+  const btn = document.getElementById('semanticBtn');
+  btn.textContent = 'Searching...';
+  btn.disabled = true;
+  try {
+    const typeParam = searchMode !== 'all' ? `&type=${searchMode}` : '';
+    const data = await api(`/api/databases/${currentDb}/search?q=${encodeURIComponent(q)}&limit=25${typeParam}`);
+    currentEntries = data.entries;
+    currentTotal = data.total;
+    currentOffset = 0;
+    const body = document.getElementById('entriesBody');
+    const empty = document.getElementById('entriesEmpty');
+    if (!data.entries.length) {
+      body.innerHTML = '';
+      empty.style.display = 'block';
+    } else {
+      empty.style.display = 'none';
+      body.innerHTML = data.entries.map((e, i) => {
+        const preview = e.meta?.content ? e.meta.content.slice(0, 100) : '';
+        const sim = e.similarity != null ? (e.similarity * 100).toFixed(1) + '%' : '';
+        const tag = e._source === 'semantic' ? '<span style="background:#34c759;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">semantic</span>' : e._source === 'clip-image' ? '<span style="background:#ff9f0a;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">CLIP</span>' : '';
+        return `<tr style="cursor:pointer" onclick="openPreview(${i})">
+          <td onclick="event.stopPropagation()"><input type="checkbox" class="entry-checkbox" value="${e.id}" onchange="updateSelected()"></td>
+          <td style="font-family:monospace;font-size:11px">${(e.id || '').slice(0, 12)}</td>
+          <td><strong>${e.meta?.title || e.meta?.filePath || '-'}${tag}</strong></td>
+          <td>${e.collection || '-'}</td>
+          <td>${e.meta?.type || '-'}</td>
+          <td style="font-weight:500;color:#34c759">${sim}</td>
+          <td class="entry-content">${escHtml(preview)}</td>
+        </tr>`;
+      }).join('');
+    }
+    document.getElementById('pageInfo').textContent = data.total + ' results (' + data.keyword + ' keyword, ' + data.semantic + ' semantic' + (data.clipImages ? ', ' + data.clipImages + ' CLIP' : '') + ')';
+    document.getElementById('prevBtn').disabled = true;
+    document.getElementById('nextBtn').disabled = true;
+  } catch (e) {
+    alert('Semantic search failed: ' + e.message);
+  } finally {
+    btn.textContent = 'Semantic';
+    btn.disabled = false;
+  }
+}
+
+async function newDatabase() {
+  const name = prompt('New database name:');
+  if (!name) return;
+  await api('/api/databases', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name })
+  });
+  await loadDatabases();
+}
+
+async function newCollection() {
+  const name = prompt('New collection name:');
+  if (!name) return;
+  await api('/api/databases/' + currentDb + '/collections', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ collection: name })
+  });
+  await loadOverview();
+  await loadCollections();
+}
+
+let searchMode = 'all';
+
+function setSearchMode(mode) {
+  searchMode = mode;
+  document.querySelectorAll('.search-mode').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  loadEntries();
+}
+
+function onSearchInput() {
+  loadEntries();
+}
+
+async function uploadDocuments(event) {
+  const files = [...event.target.files];
+  if (!files.length) return;
+  const msg = document.getElementById('docMsg');
+  const coll = document.getElementById('uploadCollection').value || undefined;
+  let done = 0, failed = 0;
+  for (const file of files) {
+    msg.className = '';
+    msg.textContent = `[${done+failed+1}/${files.length}] Processing ${file.name}...`;
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result.split(',')[1]);
+        r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+      await api('/api/databases/' + currentDb + '/documents', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ data: base64, filename: file.name, collection: coll })
+      });
+      done++;
+    } catch (e) {
+      failed++;
+      console.error('Upload failed:', file.name, e);
+    }
+  }
+  msg.className = failed ? 'error' : 'success';
+  msg.textContent = `${done} added` + (failed ? `, ${failed} failed` : '');
+  setTimeout(() => msg.textContent = '', 5000);
+  event.target.value = '';
+  currentOffset = 0;
+  await loadOverview();
+  await loadCollections();
+  if (document.getElementById('panel-entries').classList.contains('active')) await loadEntries();
+}
+
+function openPreview(idx) {
+  const e = currentEntries[idx];
+  if (!e) return;
+  document.getElementById('previewTitle').textContent = e.meta?.title || e.meta?.filePath || 'Entry ' + (e.id || '').slice(0, 12);
+  const body = document.getElementById('previewBody');
+  const vec = e.vector ? Array.from(e.vector) : [];
+  let html = '';
+  const fields = [
+    ['ID', e.id],
+    ['Collection', e.collection],
+    ['Type', e.meta?.type],
+    ['Title', e.meta?.title],
+    ['File Path', e.meta?.filePath],
+    ['Magnitude', e.magnitude != null ? e.magnitude.toFixed(4) : null]
+  ];
+  for (const [label, val] of fields) {
+    if (val != null) html += `<div class="field"><div class="field-label">${label}</div><div class="field-value">${escHtml(String(val))}</div></div>`;
+  }
+  if (e.meta?.content) {
+    html += `<div class="field"><div class="field-label">Content</div><div class="field-value">${escHtml(e.meta.content)}</div></div>`;
+  }
+  if (e.meta?.type === 'image' && e.meta?.filePath) {
+    html += `<div class="field"><div class="field-label">Image</div><div class="field-value img-preview" id="imgPreview"><span style="color:#6e6e73">Checking...</span></div></div>`;
+  }
+  if (vec.length) {
+    html += `<div class="field"><div class="field-label">Vector (${vec.length} dims)</div><div class="vec-values">${vec.map(v => v.toFixed(4)).join(', ')}</div></div>`;
+  }
+  body.innerHTML = html;
+  if (e.meta?.type === 'image' && e.meta?.filePath) {
+    const imgUrl = '/api/file?path=' + encodeURIComponent(e.meta.filePath);
+    const img = new Image();
+    img.onload = () => {
+      const c = document.getElementById('imgPreview');
+      if (c) { c.innerHTML = ''; c.appendChild(img); }
+    };
+    img.onerror = () => {
+      const c = document.getElementById('imgPreview');
+      if (c) c.innerHTML = '<span style="color:#999">File not found: ' + escHtml(e.meta.filePath) + '</span>';
+    };
+    img.src = imgUrl;
+  }
+  document.getElementById('previewModal').classList.add('open');
+}
+
+function closePreview(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('previewModal').classList.remove('open');
+}
+
+async function dropDatabase() {
+  if (!confirm('Permanently delete database "' + currentDb + '" and all its entries?')) return;
+  if (!confirm('Are you sure? This cannot be undone.')) return;
+  await api('/api/databases/' + currentDb, { method: 'DELETE' });
+  currentDb = null;
+  document.getElementById('dbView').style.display = 'none';
+  document.getElementById('welcome').style.display = 'block';
+  await loadDatabases();
+}
+
+async function dropCollection(name) {
+  if (!confirm('Delete collection "' + name + '" and all its entries?')) return;
+  await api('/api/databases/' + currentDb + '/collections/' + encodeURIComponent(name), { method: 'DELETE' });
+  await loadOverview();
+  await loadCollections();
+  await loadEntries();
+}
+
+function toggleSelectAll() {
+  const checked = document.getElementById('selectAll').checked;
+  document.querySelectorAll('.entry-checkbox').forEach(cb => cb.checked = checked);
+  updateSelected();
+}
+
+function updateSelected() {
+  const checked = document.querySelectorAll('.entry-checkbox:checked');
+  document.getElementById('selectedCount').textContent = checked.length + ' selected';
+  document.getElementById('deleteSelectedBtn').style.display = checked.length ? '' : 'none';
+}
+
+async function deleteSelected() {
+  const ids = [...document.querySelectorAll('.entry-checkbox:checked')].map(cb => cb.value);
+  if (!ids.length) return;
+  if (!confirm('Delete ' + ids.length + ' selected entries?')) return;
+  await api('/api/databases/' + currentDb + '/entries/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ ids })
+  });
+  await loadOverview();
+  await loadCollections();
+  await loadEntries();
+}
+
+loadDatabases();
+</script>
+</body>
+</html>
