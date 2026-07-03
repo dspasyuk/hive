@@ -1,7 +1,5 @@
 # Hive
 
-![Hive](./img/hive.png)
-
 **Hive** is a lightweight, file-based multimodal vector database and semantic search engine for Node.js. It stores, retrieves, and searches text and image documents using vector embeddings — no external services required.
 
 ## Features
@@ -185,8 +183,11 @@ Remote tools require `username` and `password` parameters (validated against `hi
 
 ## Screenshots
 
+### Client Search UI
+![Client Search UI](./assets/client.png)
+
 ### Admin Web UI
-![Admin Web UI](./admin.png)
+![Admin Web UI](./assets/admin.png)
 
 ## License
 
