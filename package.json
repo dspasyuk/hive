@@ -4,7 +4,7 @@
   "description": "Lightweight file-based multimodal vector database and semantic search engine for Node.js with MCP server support",
   "main": "hive.js",
   "bin": {
-    "hive": "./admin.js"
+    "hive": "admin.js"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
