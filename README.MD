@@ -7,76 +7,90 @@
 ## Features
 
 - **Multimodal** — Store text and images in the same database
-- **Semantic Search** — Text-to-text and image-to-image similarity search
+- **Semantic Search** — Text-to-text, text-to-image, and image-to-image similarity search
 - **Auto-processing** — Automatically detects file types and generates embeddings
 - **File support** — `.txt`, `.doc`, `.docx`, `.pdf` (text); `.png`, `.jpg`, `.jpeg` (images)
-- **Binary persistence** — On-disk `.bin` with `msgpackr`-serialized `Float32Array` for fast startup
+- **Binary persistence** — On-disk `.bin` with `msgpackr`-serialized for fast startup
 - **Configurable chunking** — Configurable `SliceSize`, `overlap`, and `minSliceSize`
 - **File watching** — Watch directories for changes with `chokidar`
 - **Cross-encoder reranking** — Optional reranking pass for improved search quality
-- **Authentication & RBAC** — MongoDB-like role-based access control with hashed passwords
-- **MCP Server** — Expose Hive as tools for AI agents via the Model Context Protocol
+- **Per-database access control** — Granular read/readWrite permissions per database
+- **Global user store** — Users persisted in `db/hive_users.json`, survive restarts
+- **MCP Server** — Expose Hive as tools for AI agents (local stdio + remote SSE)
 - **Custom models** — Plug in any `@xenova/transformers` compatible model
 
-## Installation
+## Architecture
 
-```bash
-npm i @deonis/hive
 ```
-
-Or clone the repo:
-
-```bash
-git clone https://github.com/dspasyuk/hive.git
+node admin.js        → Web UI + REST API + MCP remote SSE (port 4173)
+node mcp.js          → Local MCP stdio (for AI assistants)
+node scripts/import-folders.js  → Batch import docs/ → databases
 ```
 
 ## Quick Start
 
-```javascript
-import Hive from '@deonis/hive';
-
-await Hive.init({
-  dbName: "MyDocuments",
-  pathToDocs: "./documents",
-  logging: true
-});
-
-// Add files manually
-await Hive.addFile("./notes.txt");
-await Hive.addFile("./photo.jpg");
-
-// Search
-const results = await Hive.find("your search query", 10);
-console.log(results);
+```bash
+git clone https://github.com/dspasyuk/hive.git
+cd hive
+npm install
+node admin.js
 ```
 
-## Authentication & RBAC
+Open `http://localhost:4173` — login with `admin` / `admin`.
 
-### Built-in Roles
+## Web UI
 
-| Role | Actions |
-|------|---------|
-| `root` / `dbOwner` | All (`*`) |
-| `readWrite` | `find`, `insert`, `update`, `delete`, `embed` |
-| `read` | `find`, `embed` |
-| `dbAdmin` | `admin` (user management) |
+The admin server provides two interfaces:
 
-```javascript
-await Hive.init({
-  dbName: "MyDB",
-  permissions: {
-    users: {
-      admin: { password: "secret", roles: ["dbOwner"] },
-      viewer: { password: "view123", roles: ["read"] }
-    },
-    autoAuth: "admin"
-  }
-});
+### Client Search UI (`/search`)
+- Full-text and semantic search across databases
+- Left sidebar with database tree selector
+- Upload files, paste text, search by image
+- Drag-and-drop file upload with progress
+- Result highlighting and similarity scores
+- Per-database access control (users see only their databases)
 
-Hive.whoAmI(); // "admin"
+### Admin Panel (`/admin`)
+- Database browser — view, create, drop databases
+- Entry explorer — browse entries with type filtering, pagination
+- Semantic search — multi-modal text and image search
+- User management — create users, set root access, assign per-database read/readWrite permissions
+- Entry preview — inspect metadata, content, vectors, images
+
+### Login
+- Default credentials: `admin` / `admin`
+- Users are stored in `db/hive_users.json` (survives restarts)
+- Root users see and manage all databases
+- Regular users only see databases they have access to
+
+## Per-Database Permissions
+
+Instead of global roles, each user's access is defined per database:
+
+| Access Level | Allows |
+|---|---|
+| `read` | Search and view documents |
+| `readWrite` | Upload, edit, delete documents; manage other users' access |
+
+Root users (role `root`) have full access to everything.
+
+**Database owners** can manage access for their databases directly from the search sidebar — click the users icon next to a database you own.
+
+## Import Folders
+
+Batch-import documents from `docs/` and `img/` subdirectories as databases:
+
+```
+docs/MeetingNotes/meeting1.txt   → database "MeetingNotes"
+docs/MeetingNotes/report.pdf
+img/Screenshots/shot1.png        → database "Screenshots"
 ```
 
-> **No users configured** = all operations allowed (backward compatible).
+```bash
+npm run import-folders
+```
+
+Each subdirectory becomes a database named after the folder. Top-level files in `docs/` go into the `Main` database.
 
 ## API
 
@@ -91,12 +105,6 @@ Hive.whoAmI(); // "admin"
 | `Hive.insertMany(entries)` | Bulk insert |
 | `Hive.deleteOne(id)` | Delete by ID |
 | `Hive.updateOne(query, entry)` | Update a document |
-| `Hive.auth(username, password)` | Authenticate a user |
-| `Hive.logout()` | Clear current user |
-| `Hive.whoAmI()` | Get current username |
-| `Hive.createUser({ user, pwd, roles })` | Create a user |
-| `Hive.dropUser(username)` | Delete a user |
-| `Hive.getUsers()` | List users with roles |
 
 ### `Hive.init(options)`
 
@@ -113,30 +121,18 @@ Hive.whoAmI(); // "admin"
 | `overlap` | `5%` of `SliceSize` | Chunk overlap (percentage < 1 or token count >= 1) |
 | `rerank` | `false` | Enable cross-encoder reranking |
 | `models` | — | Override embedding models (`{ text, image, rerank }`) |
-| `permissions` | — | Auth config: `{ users: { user: { password, roles } }, autoAuth }` |
 
 ## MCP Server
 
-Hive includes an MCP server for AI agent integration. All Hive operations are exposed as tools.
+Hive exposes its search and ingestion capabilities as MCP tools for AI agents (Claude, opencode, etc).
 
-Configure with environment variables for auto-initialization on startup:
+### Local stdio (for AI assistants on the same machine)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HIVE_STORAGE_DIR` | — | Directory to store the database (required for auto-init) |
-| `HIVE_DB_NAME` | `Documents` | Database name |
-| `HIVE_DOCS_DIR` | — | Directory to auto-import documents from |
-| `HIVE_WATCH` | `false` | Watch docs directory for changes |
-| `HIVE_LOGGING` | `false` | Enable processing logs |
-| `HIVE_RERANK` | `false` | Enable cross-encoder reranking |
+```bash
+npm run mcp
+```
 
-### Tools
-
-`hive_init` · `hive_find` · `hive_insert_one` · `hive_insert_many` · `hive_delete_one` · `hive_update_one` · `hive_add_file` · `hive_remove_file` · `hive_embed` · `hive_auth` · `hive_whoami` · `hive_logout` · `hive_create_user` · `hive_drop_user` · `hive_get_users`
-
-### AI Client Setup
-
-Minimal (call `hive_init` manually):
+MCP client config:
 
 ```json
 {
@@ -149,28 +145,31 @@ Minimal (call `hive_init` manually):
 }
 ```
 
-With auto-init (DB ready on startup):
+Tools: `hive_init`, `hive_find`, `hive_add_file`, `hive_embed`
+
+### Remote SSE (built into admin server)
+
+The admin server includes an MCP SSE endpoint at `http://host:4173/mcp/sse` — no extra process needed.
+
+MCP client config:
 
 ```json
 {
   "mcpServers": {
     "hive": {
-      "command": "node",
-      "args": ["/path/to/hive/mcp.js"],
-      "env": {
-        "HIVE_STORAGE_DIR": "/path/to/data",
-        "HIVE_DB_NAME": "Knowledge",
-        "HIVE_DOCS_DIR": "/path/to/documents",
-        "HIVE_LOGGING": "true"
-      }
+      "url": "http://your-server:4173/mcp/sse"
     }
   }
 }
 ```
 
-### opencode Configuration
+Remote tools require `username` and `password` parameters (validated against `hive_users.json`):
 
-In `~/.config/opencode/opencode.json` or project `opencode.json`:
+- `hive_find` — search a database (checks read access)
+- `hive_add_file` — upload a file (checks write access)
+- `hive_auth` — verify credentials and list accessible databases
+
+### opencode Configuration
 
 ```json
 {
@@ -178,48 +177,16 @@ In `~/.config/opencode/opencode.json` or project `opencode.json`:
     "hive": {
       "type": "local",
       "command": ["node", "/path/to/hive/mcp.js"],
-      "enabled": true,
-      "environment": {
-        "HIVE_STORAGE_DIR": "/path/to/data",
-        "HIVE_DB_NAME": "Knowledge",
-        "HIVE_LOGGING": "true"
-      }
+      "enabled": true
     }
   }
 }
 ```
 
-Hive tools are then automatically available to the AI agent as a knowledge source.
+## Screenshots
 
-## Admin Web UI
-
-Hive includes a built-in admin web interface for browsing and managing databases through a visual dashboard.
-
-```bash
-node admin.js
-```
-
-Opens at `http://localhost:4173`. Features:
-
-- **Database browser** — View, create, and drop databases and collections
-- **Entry explorer** — Browse entries with search, type filtering, and pagination
-- **Semantic search** — Multi-modal text and image search with CLIP and bge embeddings
-- **Entry preview** — Inspect metadata, content, vector, and image previews
-- **User management** — Create, edit, and delete users with RBAC roles
-- **File upload** — Upload text and image files with automatic embedding
-- **Delete entries** — Bulk delete with multi-select
-
-### Search
-
-The search bar supports three modes: **All**, **Text**, and **Images**. The **Semantic** button performs vector similarity search using text embeddings (bge-base-en-v1.5) and CLIP text-to-image search, returning results sorted by relevance. Use the Images filter to get only image results from CLIP.
-
-### Screenshot
-
+### Admin Web UI
 ![Admin Web UI](./admin.png)
-
-## Performance
-
-~30ms search in a database with **30,000 entries** on an AMD Ryzen 7 3700X.
 
 ## License
 

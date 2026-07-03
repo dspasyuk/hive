@@ -47,7 +47,7 @@ class Hive {
   };
 
   static documents = {
-    text: [".txt", ".doc", ".docx", ".pdf"],
+    text: [".txt", ".doc", ".docx", ".pdf", ".md", ".py", ".js", ".sh", ".csv", ".json"],
     image: [".png", ".jpg", ".jpeg"],
   };
   static SliceSize = 512;
@@ -363,25 +363,22 @@ class Hive {
   }
 
   static saveToDisk() {
+    const dbPath = Hive.pathToDB;
     return new Promise((resolve, reject) => {
-      if (Hive.saveTimeout) {
-        clearTimeout(Hive.saveTimeout);
-      }
+      if (Hive.saveTimeout) clearTimeout(Hive.saveTimeout);
       Hive.saveTimeout = setTimeout(async () => {
         if (Hive.isSaving) {
-            // If already saving, schedule another save after a short delay
-            Hive.saveToDisk(); 
-            return;
+          Hive._pendingSave = { resolve, reject, dbPath };
+          return;
         }
-        
         Hive.isSaving = true;
         try {
-          await Hive.ensureDirectoryExists(Hive.pathToDB);
-          const tempPath = `${Hive.pathToDB}.tmp`;
+          await Hive.ensureDirectoryExists(dbPath);
+          const tempPath = `${dbPath}.tmp`;
           const fileStream = fs.createWriteStream(tempPath, { flags: 'w' });
-          
-          let error = null;
-          fileStream.on('error', (err) => { error = err; });
+
+          let streamError = null;
+          fileStream.on('error', (err) => { streamError = err; });
 
           const packr = new Packr({ structuredClone: true });
 
@@ -390,48 +387,43 @@ class Hive {
             for (const [username, data] of Hive.users.entries()) {
               usersData[username] = data;
             }
-            const record = {
-              collection: "__hive__",
-              _type: "users",
-              data: usersData
-            };
+            const record = { collection: "__hive__", _type: "users", data: usersData };
             if (!fileStream.write(packr.pack(record))) {
-              await new Promise(resolve => fileStream.once('drain', resolve));
+              await new Promise(r => fileStream.once('drain', r));
             }
           }
 
           for (const [key, value] of Hive.collections.entries()) {
             for (const entry of value) {
-                const record = {
-                    collection: key,
-                    id: entry.id,
-                    vector: entry.vector,
-                    meta: entry.meta,
-                    magnitude: entry.magnitude
-                };
-                if (!fileStream.write(packr.pack(record))) {
-                    await new Promise(resolve => fileStream.once('drain', resolve));
-                }
+              const record = {
+                collection: key, id: entry.id,
+                vector: entry.vector, meta: entry.meta, magnitude: entry.magnitude
+              };
+              if (!fileStream.write(packr.pack(record))) {
+                await new Promise(r => fileStream.once('drain', r));
+              }
             }
           }
-          
+
           fileStream.end();
-          await new Promise((resolve, reject) => {
-              fileStream.on('finish', resolve);
-              fileStream.on('error', reject);
+          await new Promise((res, rej) => {
+            fileStream.on('finish', res);
+            fileStream.on('error', rej);
           });
-
-          if (error) throw error;
-
-          await fs.promises.rename(tempPath, Hive.pathToDB);
-          
-          Hive.log(`Database saved to ${Hive.pathToDB}`);
+          if (streamError) throw streamError;
+          await fs.promises.rename(tempPath, dbPath);
+          Hive.log(`Database saved to ${dbPath}`);
           resolve();
         } catch (error) {
-          console.error("Error saving database:", error);
+          console.error('Error saving database:', error.message);
           reject(error);
         } finally {
-            Hive.isSaving = false;
+          Hive.isSaving = false;
+          if (Hive._pendingSave) {
+            const p = Hive._pendingSave;
+            Hive._pendingSave = null;
+            Hive.saveToDisk().then(p.resolve).catch(p.reject);
+          }
         }
       }, Hive.saveInterval);
     });
@@ -734,13 +726,13 @@ class Hive {
         for (const file of files) {
           let fullPath = path.join(dir, file.name);
           const ext = path.extname(file.name).toLowerCase();
-          
+
           if (file.isSymbolicLink()) {
             try {
               fullPath = await fs.promises.readlink(fullPath);
             } catch (error) { continue; }
           }
-      
+
           try {
             const stats = await fs.promises.stat(fullPath);
             if (stats.isDirectory()) {
@@ -750,11 +742,12 @@ class Hive {
             } else if (Hive.documents.image.includes(ext)) {
               await Hive.readFile(fullPath, "image");
             }
-          } catch (error) { }
+          } catch (error) {
+            console.error(`Error processing ${fullPath}:`, error.message);
+          }
         }
-        Hive.saveToDisk();
     } catch (err) {
-        console.error(`Error reading directory ${dir}:`, err);
+        console.error(`Error reading directory ${dir}:`, err.message);
     }
   }
 
@@ -858,44 +851,36 @@ class Hive {
       if (type === "text") {
         let { text } = await doc2txt.extractTextFromFile(filePath);
         const [tokens, len] = Hive.tokenCount(text);
-          let startIndex = 0;
-          
-          // Calculate overlap in tokens
-          let overlapTokens = 0;
-          if (Hive.overlap < 1 && Hive.overlap > 0) {
-             // Percentage
-             overlapTokens = Math.floor(Hive.SliceSize * Hive.overlap);
-          } else {
-             // Absolute token count
-             overlapTokens = Math.floor(Hive.overlap);
+        let startIndex = 0;
+
+        let overlapTokens = 0;
+        if (Hive.overlap < 1 && Hive.overlap > 0) {
+          overlapTokens = Math.floor(Hive.SliceSize * Hive.overlap);
+        } else {
+          overlapTokens = Math.floor(Hive.overlap);
+        }
+
+        const stride = Math.max(1, Hive.SliceSize - overlapTokens);
+
+        while (startIndex < len) {
+          let endIndex = Math.min(startIndex + Hive.SliceSize, len);
+          const sliceLength = endIndex - startIndex;
+
+          if (sliceLength >= Hive.minSliceSize) {
+            const slice = tokens.slice(startIndex, endIndex).join(" ");
+            await Hive.addItem(slice, filePath, type);
+          } else if (sliceLength > 0 && Hive.minSliceSize > 1) {
+            Hive.log(`Skipped ${sliceLength} token slice in ${path.basename(filePath)} (minSliceSize=${Hive.minSliceSize})`);
           }
 
-          // Ensure overlap is not greater than SliceSize (prevent infinite loop)
-          if (overlapTokens >= Hive.SliceSize) {
-             overlapTokens = Hive.SliceSize - 1; 
-          }
-
-          while (startIndex < len) {
-            let endIndex = startIndex + Hive.SliceSize;
-            endIndex = Math.min(endIndex, len);
-
-            const sliceLength = endIndex - startIndex;
-            if (sliceLength >= Hive.minSliceSize) {
-              const slice = tokens.slice(startIndex, endIndex).join(" ");
-              await Hive.addItem(slice, filePath, type);
-            }
-            
-            // Move start index by stride (SliceSize - overlap)
-            // If we reached the end, break
-            if (endIndex === len) break;
-            
-            startIndex += (Hive.SliceSize - overlapTokens);
-          }
+          if (endIndex === len) break;
+          startIndex += stride;
+        }
       } else if (type === "image") {
         await Hive.addItem("", filePath, type);
       }
     } catch (error) {
-      console.error(`Error reading file ${filePath}:`, error);
+      console.error(`Error reading file ${filePath}:`, error.message);
     }
   }
 

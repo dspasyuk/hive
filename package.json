@@ -1,6 +1,6 @@
 {
   "name": "@deonis/hive",
-  "version": "1.3.50",
+  "version": "1.4.0",
   "description": "Lightweight file-based multimodal vector database and semantic search engine for Node.js with MCP server support",
   "main": "hive.js",
   "bin": {
@@ -9,7 +9,8 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "mcp": "node mcp.js"
+    "mcp": "node mcp.js",
+    "import-folders": "node scripts/import-folders.js"
   },
   "type": "module",
   "author": "Denis Spasyuk",
@@ -19,7 +20,11 @@
     "@xenova/transformers": "^2.17.2",
     "canvas": "^3.2.0",
     "chokidar": "^4.0.1",
+    "ejs": "^3.1.10",
     "express": "^5.2.1",
+    "express-session": "^1.18.1",
+    "multer": "^2.1.1",
+    "session-file-store": "^1.5.0",
     "jszip": "^3.10.1",
     "msgpackr": "^1.11.8",
     "pdf-text-reader": "^5.1.0",

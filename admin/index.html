@@ -100,17 +100,18 @@ tr:hover td { background: #f5f5f7; }
   <input type="file" id="fileInput" accept=".bin" style="display:none" onchange="uploadDatabase(event)">
   <button class="refresh" onclick="loadDatabases()" style="margin-top:4px">Refresh</button>
   <button class="refresh" onclick="newDatabase()" style="margin-top:4px">+ New Database</button>
+  <button class="refresh" onclick="showUsersPanel()" style="margin-top:4px">Users</button>
+  <button class="refresh" onclick="window.location.href='/logout'" style="margin-top:4px; border-color:rgba(255,59,48,0.4); color:#ff3b30;">Logout</button>
 </div>
 <div class="main" id="main">
   <div class="empty-state" id="welcome">
-    <h3>Select a database</h3>
-    <p>Choose a database from the sidebar to browse its collections, entries, and users.</p>
+      <h3>Select a database</h3>
+      <p>Choose a database from the sidebar to browse its collections and entries, or click <strong>Users</strong> to manage accounts.</p>
   </div>
   <div id="dbView" style="display:none">
     <div class="tabs">
       <button class="tab active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
       <button class="tab" data-tab="entries" onclick="switchTab('entries')">Entries</button>
-      <button class="tab" data-tab="users" onclick="switchTab('users')">Users</button>
     </div>
     <div class="panel active" id="panel-overview">
       <div class="card">
@@ -161,19 +162,23 @@ tr:hover td { background: #f5f5f7; }
         </div>
       </div>
     </div>
-    <div class="panel" id="panel-users">
-      <div class="card">
-        <h2>Users</h2>
-        <div id="userList"></div>
+  </div>
+  <div id="usersView" style="display:none">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Users</h2>
+        <span style="font-size:12px;color:#6e6e73" id="userInfo"></span>
       </div>
-      <div class="card">
-        <h2>Add User</h2>
-        <div class="form-row"><label>Username</label><input type="text" id="newUsername" placeholder="username"></div>
-        <div class="form-row"><label>Password</label><input type="password" id="newPassword" placeholder="password"></div>
-        <div class="form-row"><label>Roles</label><select id="newRoles" multiple><option value="read" selected>read</option><option value="readWrite">readWrite</option><option value="dbAdmin">dbAdmin</option><option value="dbOwner">dbOwner</option></select></div>
-        <button class="btn" onclick="addUser()">Create User</button>
-        <div id="userMessage"></div>
-      </div>
+      <div id="userList"></div>
+    </div>
+    <div class="card">
+      <h2>Add User</h2>
+      <div class="form-row"><label>Username</label><input type="text" id="newUsername" placeholder="username"></div>
+      <div class="form-row"><label>Password</label><input type="password" id="newPassword" placeholder="password"></div>
+      <div class="form-row"><label><input type="checkbox" id="newRootAccess"> Root access (full control)</label></div>
+      <div class="form-row" style="align-items:flex-start"><label>Databases</label><div id="newUserDbAccessList"></div></div>
+      <button class="btn" onclick="addUser()">Create User</button>
+      <div id="userMessage"></div>
     </div>
   </div>
   <div class="modal-overlay" id="previewModal" onclick="closePreview(event)">
@@ -185,6 +190,22 @@ tr:hover td { background: #f5f5f7; }
       <div class="modal-body" id="previewBody"></div>
     </div>
   </div>
+  <div class="modal-overlay" id="editUserModal" onclick="closeEditUser(event)">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:550px">
+      <div class="modal-header">
+        <h3 id="editUserTitle">Edit User</h3>
+        <button class="modal-close" onclick="closeEditUser()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row"><label>Username</label><input type="text" id="editUsername" readonly style="background:#f5f5f7;color:#6e6e73"></div>
+        <div class="form-row"><label>Password</label><input type="password" id="editPassword" placeholder="Leave empty to keep current"></div>
+        <div class="form-row"><label><input type="checkbox" id="editRootAccess"> Root access (full control)</label></div>
+        <div class="form-row" style="align-items:flex-start"><label>Databases</label><div id="editDbAccessList"></div></div>
+        <div id="editUserMessage"></div>
+        <button class="btn" onclick="saveEditUser()" style="margin-top:8px">Save Changes</button>
+      </div>
+    </div>
+  </div>
 </div>
 <script>
 let currentDb = null;
@@ -192,6 +213,13 @@ let currentEntries = [];
 let currentOffset = 0;
 let currentTotal = 0;
 const PAGE_SIZE = 50;
+
+function showUsersPanel() {
+  document.getElementById('welcome').style.display = 'none';
+  document.getElementById('dbView').style.display = 'none';
+  document.getElementById('usersView').style.display = 'block';
+  loadUsers();
+}
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -251,6 +279,7 @@ async function selectDb(name) {
   currentDb = name;
   currentOffset = 0;
   document.getElementById('welcome').style.display = 'none';
+  document.getElementById('usersView').style.display = 'none';
   document.getElementById('dbView').style.display = 'block';
   document.querySelectorAll('.db-item').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.db-item').forEach(el => { if (el.textContent.includes(name)) el.classList.add('active'); });
@@ -266,7 +295,6 @@ async function loadOverview() {
   document.getElementById('statGrid').innerHTML = `
     <div class="stat"><div class="value">${db.collections.length}</div><div class="label">Collections</div></div>
     <div class="stat"><div class="value">${db.collections.reduce((a,c) => a + c.count, 0)}</div><div class="label">Entries</div></div>
-    <div class="stat"><div class="value">${db.userCount}</div><div class="label">Users</div></div>
   `;
 }
 
@@ -329,53 +357,133 @@ function prevPage() { currentOffset = Math.max(0, currentOffset - PAGE_SIZE); lo
 function nextPage() { currentOffset += PAGE_SIZE; loadEntries(); }
 
 async function loadUsers() {
-  const users = await api('/api/databases/' + currentDb + '/users');
+  const users = await api('/api/admin/users');
   const list = document.getElementById('userList');
+  function dbDisplay(u) {
+    if (u.roles.includes('root') || u.roles.includes('dbOwner')) return '<span style="color:#30b158;font-weight:500">All databases (root)</span>';
+    if (!u.databases.length) return '<span style="color:#999">none</span>';
+    return u.databases.map(d => d.name + ' <span style="color:#999;font-size:10px">[' + d.access + ']</span>').join(', ');
+  }
+  function isRoot(u) { return u.roles.includes('root') || u.roles.includes('dbOwner'); }
   list.innerHTML = users.length ? users.map(u => `
     <div class="user-row">
-      <div class="name">${u.user}</div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <div class="roles">${u.roles.map(r => `<span class="role-tag">${r}</span>`).join('')}</div>
+      <div class="name">${u.user}${isRoot(u) ? ' <span style="color:#30b158;font-size:11px">&#x2713; root</span>' : ''}</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:11px;color:#6e6e73">${dbDisplay(u)}</span>
+        <button class="btn btn-sm" style="background:#e8e8ed;color:#1d1d1f;border:none" onclick="editUser('${u.user}')">Edit</button>
         <button class="btn btn-sm btn-danger" onclick="deleteUser('${u.user}')">Delete</button>
       </div>
     </div>
-  `).join('') : '<div class="empty-state" style="padding:20px">No users configured (all operations allowed)</div>';
+  `).join('') : '<div class="empty-state" style="padding:20px">No users configured</div>';
+  document.getElementById('userInfo').textContent = users.length + ' total users';
+  
+  const dbs = await api('/api/databases');
+  const addList = document.getElementById('newUserDbAccessList');
+  if (addList) {
+    addList.innerHTML = dbs.map(d => dbAccessHtml(d.name, null)).join('');
+  }
 }
 
 async function addUser() {
   const user = document.getElementById('newUsername').value.trim();
   const password = document.getElementById('newPassword').value;
-  const roles = [...document.getElementById('newRoles').selectedOptions].map(o => o.value);
+  const isRoot = document.getElementById('newRootAccess').checked;
+  const containers = document.querySelectorAll('.db-access-sel');
+  const databases = [];
+  containers.forEach(sel => {
+    if (sel.value !== 'none') databases.push({ name: sel.dataset.db, access: sel.value });
+  });
   const msg = document.getElementById('userMessage');
   if (!user || !password) { msg.className = 'error'; msg.textContent = 'Username and password required'; return; }
   try {
-    await api('/api/databases/' + currentDb + '/users', {
+    await api('/api/admin/users', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ user, password, roles })
+      body: JSON.stringify({ user, password, roles: isRoot ? ['root'] : ['read'], databases })
     });
     document.getElementById('newUsername').value = '';
     document.getElementById('newPassword').value = '';
     msg.className = 'success';
     msg.textContent = 'User created';
     await loadUsers();
-    await loadOverview();
   } catch (e) { msg.className = 'error'; msg.textContent = e.message; }
 }
 
 async function deleteUser(username) {
   if (!confirm('Delete user "' + username + '"?')) return;
   try {
-    await api('/api/databases/' + currentDb + '/users/' + username, { method: 'DELETE' });
+    await api('/api/admin/users/' + username, { method: 'DELETE' });
     await loadUsers();
-    await loadOverview();
   } catch (e) { alert(e.message); }
+}
+
+function dbAccessHtml(dbName, currentAccess) {
+  const access = currentAccess || 'none';
+  return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+    '<span style="min-width:100px;font-size:13px">' + dbName + '</span>' +
+    '<select class="db-access-sel" data-db="' + dbName + '" style="padding:4px 8px;border:1px solid #d2d2d7;border-radius:6px;font-size:12px;background:#fff">' +
+    '<option value="none"' + (access === 'none' ? ' selected' : '') + '>No access</option>' +
+    '<option value="read"' + (access === 'read' ? ' selected' : '') + '>Read only</option>' +
+    '<option value="readWrite"' + (access === 'readWrite' ? ' selected' : '') + '>Read/Write</option>' +
+    '</select></div>';
+}
+
+async function editUser(username) {
+  const current = await api('/api/admin/users');
+  const user = current.find(u => u.user === username);
+  if (!user) return;
+  const dbs = await api('/api/databases');
+  document.getElementById('editUsername').value = user.user;
+  document.getElementById('editPassword').value = '';
+  document.getElementById('editUserMessage').textContent = '';
+  document.getElementById('editRootAccess').checked = user.roles.includes('root') || user.roles.includes('dbOwner');
+  const userDbs = user.databases || [];
+  const dbMap = {};
+  userDbs.forEach(d => { dbMap[d.name] = d.access; });
+  document.getElementById('editDbAccessList').innerHTML =
+    dbs.map(d => dbAccessHtml(d.name, dbMap[d.name] || null)).join('');
+  document.getElementById('editUserTitle').textContent = 'Edit User: ' + user.user;
+  document.getElementById('editUserModal').classList.add('open');
+}
+
+function closeEditUser(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('editUserModal').classList.remove('open');
+}
+
+async function saveEditUser() {
+  const username = document.getElementById('editUsername').value;
+  const password = document.getElementById('editPassword').value;
+  const isRoot = document.getElementById('editRootAccess').checked;
+  const containers = document.querySelectorAll('.db-access-sel');
+  const databases = [];
+  containers.forEach(sel => {
+    if (sel.value !== 'none') databases.push({ name: sel.dataset.db, access: sel.value });
+  });
+  const msg = document.getElementById('editUserMessage');
+  try {
+    const body = { roles: isRoot ? ['root'] : ['read'] };
+    if (password) body.password = password;
+    await api('/api/admin/users/' + username, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    await api('/api/admin/users/' + username + '/databases', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ databases })
+    });
+    closeEditUser();
+    await loadUsers();
+  } catch (e) { msg.className = 'error'; msg.textContent = e.message; }
 }
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'entries') loadEntries();
+  if (name === 'users') showUsersPanel();
 }
 
 function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }

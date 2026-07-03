@@ -7,17 +7,60 @@ import { Packr, UnpackrStream } from 'msgpackr';
 import crypto from 'crypto';
 import Hive from './hive.js';
 import { pipeline, CLIPTextModelWithProjection, AutoTokenizer } from '@xenova/transformers';
+import session from 'express-session';
+import FileStore from 'session-file-store';
+import multer from 'multer';
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_DIR = path.join(process.cwd(), 'db');
-const PORT = process.env.PORT || 4173;
+const GLOBAL_USERS_PATH = path.join(DB_DIR, 'hive_users.json');
+const PORT = process.env.PORT || 3000;
 const app = express();
+
+const upload = multer({ dest: 'uploads/' });
+const FileStoreSession = FileStore(session);
 
 function asyncRoute(fn) {
   return (req, res, next) => fn(req, res, next).catch(next);
 }
 
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+
 app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+app.use(session({
+  store: new FileStoreSession({ path: path.join(__dirname, 'sessions'), retries: 0, reapInterval: -1 }),
+  secret: 'hive-session-secret-change-in-production',
+  resave: false,
+  saveUninitialized: false,
+  rolling: true,
+  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000, httpOnly: true, sameSite: 'lax' }
+}));
+
+app.use((req, res, next) => {
+  if (req.session?.user?.username) {
+    Hive.currentUser = req.session.user.username;
+  } else {
+    Hive.currentUser = null;
+  }
+  next();
+});
+
+function loggedIn(req, res, next) {
+  if (req.session.loggedin) return next();
+  if (req.xhr || req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  res.redirect('/login');
+}
 
 function listDatabases() {
   if (!fs.existsSync(DB_DIR)) return [];
@@ -45,23 +88,134 @@ function readEntries(binPath, defaultCollection) {
 
 function writeEntries(binPath, entries) {
   return new Promise((resolve, reject) => {
-    const packr = new Packr();
+    const packr = new Packr({ structuredClone: true });
     const tmp = binPath + '.tmp';
-    const writeStream = createWriteStream(tmp);
+    const ws = createWriteStream(tmp);
+    let streamError = null;
+    ws.on('error', (err) => { streamError = err; });
     for (const entry of entries) {
-      writeStream.write(packr.encode(entry));
+      ws.write(packr.encode(entry));
     }
-    writeStream.end();
-    writeStream.on('finish', () => {
+    ws.end();
+    ws.on('finish', () => {
+      if (streamError) return reject(streamError);
       fs.renameSync(tmp, binPath);
       resolve();
     });
-    writeStream.on('error', reject);
   });
 }
 
 function hashPassword(password, salt) {
   return crypto.createHash('sha256').update(salt + password).digest('hex');
+}
+
+// Fast saves for admin operations
+Hive.saveInterval = 100;
+
+// Persist users to a dedicated JSON file (immediate, survives restarts)
+function saveGlobalUsers() {
+  if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+  const data = {};
+  for (const [username, userData] of Hive.users) {
+    data[username] = {
+      password: userData.password,
+      salt: userData.salt,
+      roles: userData.roles,
+      databases: serializeDbAccess(userData.databases)
+    };
+  }
+  fs.writeFileSync(GLOBAL_USERS_PATH, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+function loadGlobalUsers() {
+  if (!fs.existsSync(GLOBAL_USERS_PATH)) return;
+  try {
+    const data = JSON.parse(fs.readFileSync(GLOBAL_USERS_PATH, 'utf-8'));
+    for (const [username, userData] of Object.entries(data)) {
+      if (!Hive.users.has(username)) {
+        Hive.users.set(username, {
+          password: userData.password,
+          salt: userData.salt,
+          roles: userData.roles || ['read'],
+          databases: normalizeDbAccess(userData.databases)
+        });
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load global users:', e.message);
+  }
+}
+
+// Normalize old array format to new {name,access}[] format
+function normalizeDbAccess(databases) {
+  if (!databases || !Array.isArray(databases)) return [];
+  return databases.map(d => {
+    if (typeof d === 'string') return { name: d, access: 'read' };
+    return { name: d.name, access: d.access || 'read' };
+  });
+}
+
+function dbAccessForUser(username, dbName) {
+  const user = Hive.users.get(username);
+  if (!user) return null;
+  if (user.roles?.includes('root') || user.roles?.includes('dbOwner')) return 'readWrite';
+  const dbs = normalizeDbAccess(user.databases);
+  const entry = dbs.find(d => d.name === dbName);
+  return entry ? entry.access : null;
+}
+
+function userCanAccessDb(username, dbName) {
+  return dbAccessForUser(username, dbName) !== null;
+}
+
+function userCanWriteDb(username, dbName) {
+  const access = dbAccessForUser(username, dbName);
+  return access === 'readWrite';
+}
+
+function getUserDatabases(username) {
+  const user = Hive.users.get(username);
+  if (!user) return [];
+  if (user.roles?.includes('root') || user.roles?.includes('dbOwner')) return listDatabases();
+  return normalizeDbAccess(user.databases)
+    .map(d => d.name)
+    .filter(d => listDatabases().includes(d));
+}
+
+// Convert internal databases array back to storage format
+function serializeDbAccess(databases) {
+  if (!databases || !Array.isArray(databases)) return [];
+  return databases.map(d => {
+    if (typeof d === 'string') return { name: d, access: 'read' };
+    return { name: d.name, access: d.access || 'read' };
+  });
+}
+
+// Temporarily grant Hive write access to a user for a single operation.
+// Our API layer handles auth, but Hive's internal checkAuth still validates roles.
+async function withHiveWriteAccess(username, fn) {
+  if (!username || !Hive.users.has(username)) return fn();
+  const userData = Hive.users.get(username);
+  const originalRoles = [...userData.roles];
+  if (!userData.roles.includes('readWrite') && !userData.roles.includes('root') && !userData.roles.includes('dbOwner')) {
+    userData.roles.push('readWrite');
+  }
+  try {
+    return await fn();
+  } finally {
+    userData.roles = originalRoles;
+  }
+}
+
+function requireAdmin(req, res, next) {
+  const username = req.session?.user?.username;
+  if (!username) return res.status(401).json({ error: 'Not authenticated' });
+  const user = Hive.users.get(username);
+  if (!user || (!user.roles?.includes('root') && !user.roles?.includes('dbOwner') && !user.roles?.includes('dbAdmin'))) {
+    if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'Admin access required' });
+    return res.redirect('/search');
+  }
+  next();
 }
 
 app.get('/api/databases', asyncRoute(async (req, res) => {
@@ -83,6 +237,17 @@ app.post('/api/databases', asyncRoute(async (req, res) => {
   if (fs.existsSync(binPath)) return res.status(409).json({ error: 'Database already exists' });
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(binPath, Buffer.alloc(0));
+  const username = req.session?.user?.username;
+  if (username && Hive.users.has(username)) {
+    const user = Hive.users.get(username);
+    if (!user.databases) user.databases = [];
+    user.databases = normalizeDbAccess(user.databases);
+    if (!user.databases.find(d => d.name === name)) {
+      const access = (user.roles?.includes('root') || user.roles?.includes('dbOwner')) ? 'readWrite' : 'readWrite';
+      user.databases.push({ name, access });
+    }
+    saveGlobalUsers();
+  }
   res.json({ message: 'Database created', name });
 }));
 
@@ -103,12 +268,17 @@ app.post('/api/databases/:name/collections', asyncRoute(async (req, res) => {
 
 app.post('/api/databases/:name/documents', asyncRoute(async (req, res) => {
   const { name } = req.params;
+  const username = req.session?.user?.username;
+  if (username) {
+  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Access denied' });
+    if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Write permission denied for this database' });
+  }
   const { data, filename, collection } = req.body;
   if (!data) return res.status(400).json({ error: 'No file data' });
   const fname = filename || 'upload.txt';
   const ext = path.extname(fname).toLowerCase();
   const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
-  const storeDir = imageExts.includes(ext) ? path.join(process.cwd(), 'img') : path.join(process.cwd(), 'docs');
+  const storeDir = imageExts.includes(ext) ? path.join(process.cwd(), 'img', name) : path.join(process.cwd(), 'docs', name);
   if (!fs.existsSync(storeDir)) fs.mkdirSync(storeDir, { recursive: true });
   const storePath = path.join(storeDir, fname);
   let suffix = 1;
@@ -133,14 +303,14 @@ app.post('/api/databases/:name/documents', asyncRoute(async (req, res) => {
     for (const e of existing) {
       col.push(e);
     }
-    await Hive.addFile(finalPath, fname);
+    await withHiveWriteAccess(username, () => Hive.addFile(finalPath, fname));
     const newEntries = col.slice(existing.length);
     if (!newEntries.length) return res.status(500).json({ error: 'addFile created no entries' });
     const all = Hive.collections.get(coll) || [];
     await writeEntries(binPath, all);
     res.json({ message: 'Document added', file: fname, entries: newEntries.length });
   } catch (e) {
-    console.error('Upload error:', e);
+    console.error('Upload error:', e.message);
     res.status(500).json({ error: e.message });
   } finally {
     if (Hive.saveTimeout) { clearTimeout(Hive.saveTimeout); Hive.saveTimeout = null; }
@@ -350,6 +520,13 @@ app.post('/api/databases/upload', asyncRoute(async (req, res) => {
 
 app.delete('/api/databases/:name', asyncRoute(async (req, res) => {
   const { name } = req.params;
+  const username = req.session?.user?.username;
+  if (username) {
+    const user = Hive.users.get(username);
+    if (!user || (!user.roles?.includes('root') && !user.roles?.includes('dbOwner'))) {
+      return res.status(403).json({ error: 'Admin access required to delete databases' });
+    }
+  }
   const binPath = path.join(DB_DIR, name, `${name}.bin`);
   const dir = path.join(DB_DIR, name);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
@@ -358,8 +535,10 @@ app.delete('/api/databases/:name', asyncRoute(async (req, res) => {
   res.json({ message: 'Database deleted' });
 }));
 
-app.delete('/api/databases/:name/collections/:collection', asyncRoute(async (req, res) => {
+app.delete('/api/databases/:name/collections/:collection', loggedIn, asyncRoute(async (req, res) => {
   const { name, collection } = req.params;
+  const username = req.session.user.username;
+  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Access denied' });
   const binPath = path.join(DB_DIR, name, `${name}.bin`);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
   let entries = await readEntries(binPath, name);
@@ -370,8 +549,10 @@ app.delete('/api/databases/:name/collections/:collection', asyncRoute(async (req
   res.json({ message: `Collection "${collection}" dropped`, removed: before - entries.length });
 }));
 
-app.post('/api/databases/:name/entries/delete', asyncRoute(async (req, res) => {
+app.post('/api/databases/:name/entries/delete', loggedIn, asyncRoute(async (req, res) => {
   const { name } = req.params;
+  const username = req.session.user.username;
+  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Access denied' });
   const { ids } = req.body;
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
   const binPath = path.join(DB_DIR, name, `${name}.bin`);
@@ -417,6 +598,515 @@ app.get('/api/file', (req, res) => {
   }
 });
 
+// --- SEARCH UI ROUTES ---
+
+function loadDbIntoHive(binPath, dbName) {
+  return new Promise((resolve, reject) => {
+    const entries = [];
+    if (!fs.existsSync(binPath)) return resolve([]);
+    const readStream = createReadStream(binPath);
+    const unpackr = new UnpackrStream();
+    readStream.pipe(unpackr)
+      .on('data', entry => { entries.push(entry); })
+      .on('end', () => {
+        Hive.collections.clear();
+        Hive.createCollection(dbName);
+        const col = Hive.collections.get(dbName);
+        for (const e of entries) {
+          if (e.collection === '__hive__' || !e.vector || !e.vector.length) continue;
+          e.collection = dbName;
+          col.push(e);
+        }
+        resolve();
+      })
+      .on('error', reject);
+  });
+}
+
+// Login
+app.get('/login', (req, res) => {
+  res.render('login', { baseurl: '', title: 'Login', error: null });
+});
+
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.render('login', { baseurl: '', title: 'Login', error: 'Please enter both username and password.' });
+  }
+  try {
+    Hive.auth(username, password);
+    req.session.loggedin = true;
+    req.session.user = { username };
+    req.session.save((err) => {
+      if (err) { console.error('Session save error:', err); return res.status(500).send('Session error'); }
+      if (req.xhr) return res.json({ success: true });
+      res.redirect('/search');
+    });
+  } catch (error) {
+    res.render('login', { baseurl: '', title: 'Login', error: 'Invalid username or password.' });
+  }
+});
+
+app.get('/logout', (req, res) => {
+  Hive.logout();
+  req.session.destroy();
+  res.redirect('/');
+});
+
+// Search page (protected)
+app.get('/search', loggedIn, (req, res) => {
+  const username = req.session.user.username;
+  const user = Hive.users.get(username);
+  const isAdmin = user && (user.roles?.includes('root') || user.roles?.includes('dbOwner') || user.roles?.includes('dbAdmin'));
+  res.render('search', { username, isAdmin });
+});
+
+// List users with access to a database (DB owner only)
+app.get('/api/search/databases/:name/users', loggedIn, asyncRoute(async (req, res) => {
+  const { name } = req.params;
+  const username = req.session.user.username;
+  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Write access required to manage this database' });
+  const result = [];
+  for (const [u, data] of Hive.users) {
+    if (u === username) continue;
+    const dbs = normalizeDbAccess(data.databases || []);
+    const entry = dbs.find(d => d.name === name);
+    if (entry) result.push({ user: u, access: entry.access });
+  }
+  res.json(result);
+}));
+
+// Set user access to a database (DB owner only)
+app.put('/api/search/databases/:name/users/:targetUser', loggedIn, asyncRoute(async (req, res) => {
+  const { name, targetUser } = req.params;
+  const { access } = req.body;
+  const username = req.session.user.username;
+  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Write access required to manage this database' });
+  if (!Hive.users.has(targetUser)) return res.status(404).json({ error: 'User not found' });
+  const userData = Hive.users.get(targetUser);
+  userData.databases = normalizeDbAccess(userData.databases);
+  if (!access || access === 'none') {
+    userData.databases = userData.databases.filter(d => d.name !== name);
+  } else {
+    const existing = userData.databases.find(d => d.name === name);
+    if (existing) existing.access = access;
+    else userData.databases.push({ name, access });
+  }
+  saveGlobalUsers();
+  res.json({ user: targetUser, database: name, access: access || 'none' });
+}));
+
+// List databases with document counts and user's access level (protected)
+app.get('/api/search/databases', loggedIn, asyncRoute(async (req, res) => {
+  const username = req.session.user.username;
+  const dbs = getUserDatabases(username);
+  const result = [];
+  for (const name of dbs) {
+    const binPath = path.join(DB_DIR, name, `${name}.bin`);
+    const entries = await readEntries(binPath, name);
+    const docCount = entries.filter(e => e.collection !== '__hive__').length;
+    const access = dbAccessForUser(username, name);
+    result.push({ name, documentCount: docCount, access });
+  }
+  res.json(result);
+}));
+
+// Semantic search (protected)
+app.post('/api/search', loggedIn, asyncRoute(async (req, res) => {
+  const { query, dbName, searchType } = req.body;
+  if (!query) return res.status(400).json({ error: 'Query required' });
+
+  const username = req.session.user.username;
+  const searchDb = dbName === '*' ? null : dbName;
+  const dbs = searchDb ? (userCanAccessDb(username, searchDb) ? [searchDb] : []) : getUserDatabases(username);
+
+  let allResults = [];
+  for (const name of dbs) {
+    const binPath = path.join(DB_DIR, name, `${name}.bin`);
+    if (!fs.existsSync(binPath)) continue;
+    try {
+      await loadDbIntoHive(binPath, name);
+      Hive.dbName = name;
+      const isImageSearch = searchType === 'image';
+      let results;
+      if (isImageSearch) {
+        const imageEntries = (Hive.collections.get(name) || []).filter(e => e.vector && e.meta?.type === 'image');
+        if (!global.__clipTextModel) {
+          global.__clipTextModel = await CLIPTextModelWithProjection.from_pretrained(Hive.models.image);
+          global.__clipTokenizer = await AutoTokenizer.from_pretrained(Hive.models.image);
+        }
+        const inputs = await global.__clipTokenizer(query, { padding: true, truncation: true });
+        const out = await global.__clipTextModel(inputs);
+        const queryVec = Array.from(out.text_embeds.data);
+        const qMag = Math.sqrt(queryVec.reduce((s, v) => s + v * v, 0));
+        const clipResults = [];
+        for (const img of imageEntries) {
+          const vec = Array.from(img.vector);
+          const iMag = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
+          let dot = 0;
+          for (let i = 0; i < queryVec.length; i++) dot += queryVec[i] * vec[i];
+          const sim = dot / (qMag * iMag || 1);
+          clipResults.push({ document: img, similarity: sim });
+        }
+        clipResults.sort((a, b) => b.similarity - a.similarity);
+        results = clipResults.slice(0, 25);
+      } else {
+        results = await Hive.find(query, 25);
+      }
+      for (const r of results) {
+        r.document._db = name;
+        allResults.push(r);
+      }
+    } catch (e) {
+      console.error(`Search error in "${name}":`, e.message);
+    }
+  }
+
+  allResults.sort((a, b) => b.similarity - a.similarity);
+  allResults = allResults.slice(0, 25);
+  res.json(allResults);
+}));
+
+// Image search by file upload (protected)
+app.post('/api/search/image', loggedIn, upload.single('image'), asyncRoute(async (req, res) => {
+  const file = req.file;
+  const dbName = req.body.dbName || '*';
+  const username = req.session.user.username;
+
+  if (!file) return res.status(400).json({ error: 'No image file provided' });
+
+  const ext = path.extname(file.originalname).toLowerCase();
+  const tempPath = file.path + ext;
+  fs.renameSync(file.path, tempPath);
+
+  try {
+    const vectorData = await Hive.getVector(tempPath, Hive.TransOptions);
+    const queryVec = vectorData.data;
+
+    const searchDb = dbName === '*' ? null : dbName;
+    const dbs = searchDb ? (userCanAccessDb(username, searchDb) ? [searchDb] : []) : getUserDatabases(username);
+    let allResults = [];
+
+    for (const name of dbs) {
+      const binPath = path.join(DB_DIR, name, `${name}.bin`);
+      if (!fs.existsSync(binPath)) continue;
+      const entries = await readEntries(binPath, name);
+      const vectors = entries.filter(e => e.collection !== '__hive__' && e.vector && e.vector.length);
+      const qMag = Math.sqrt(queryVec.reduce((s, v) => s + v * v, 0));
+      for (const entry of vectors) {
+        const vec = Array.from(entry.vector);
+        const iMag = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
+        let dot = 0;
+        for (let i = 0; i < queryVec.length; i++) dot += queryVec[i] * vec[i];
+        const sim = dot / (qMag * iMag || 1);
+        allResults.push({ document: { ...entry, _db: name }, similarity: sim });
+      }
+    }
+
+    allResults.sort((a, b) => b.similarity - a.similarity);
+    allResults = allResults.slice(0, 25);
+    res.json(allResults);
+  } catch (e) {
+    console.error('Image search error:', e);
+    res.status(500).json({ error: 'Image search failed: ' + e.message });
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
+}));
+
+// Add text document (protected)
+app.post('/api/databases/text', loggedIn, asyncRoute(async (req, res) => {
+  const { dbName, title, text } = req.body;
+  if (!dbName || !title || !text) return res.status(400).json({ error: 'dbName, title, and text required' });
+
+  const username = req.session.user.username;
+  if (!userCanAccessDb(username, dbName)) return res.status(403).json({ error: 'Access denied' });
+  if (!userCanWriteDb(username, dbName)) return res.status(403).json({ error: 'Write permission denied for this database' });
+
+  const binPath = path.join(DB_DIR, dbName, `${dbName}.bin`);
+  if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
+
+  const docsDir = path.join(process.cwd(), 'docs', dbName);
+  if (!fs.existsSync(docsDir)) fs.mkdirSync(docsDir, { recursive: true });
+  const fileName = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_${Date.now()}.txt`;
+  const filePath = path.join(docsDir, fileName);
+  fs.writeFileSync(filePath, text, 'utf8');
+
+  try {
+    const existing = await readEntries(binPath, dbName);
+    Hive.dbName = dbName;
+    Hive.pathToDB = binPath;
+    Hive.logging = false;
+    Hive.collections.clear();
+    Hive.createCollection(dbName);
+    const col = Hive.collections.get(dbName);
+    for (const e of existing) col.push(e);
+    await withHiveWriteAccess(username, () => Hive.addFile(filePath, fileName));
+    const newEntries = col.slice(existing.length);
+    if (!newEntries.length) return res.status(500).json({ error: 'addFile created no entries' });
+    const all = Hive.collections.get(dbName) || [];
+    await writeEntries(binPath, all);
+    res.json({ message: 'Text document added', title, entries: newEntries.length });
+  } catch (e) {
+    console.error('Text upload error:', e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    if (Hive.saveTimeout) { clearTimeout(Hive.saveTimeout); Hive.saveTimeout = null; }
+    Hive.collections.clear();
+  }
+}));
+
+// Delete a document entry by ID (protected)
+app.delete('/api/databases/:name/documents/:id', loggedIn, asyncRoute(async (req, res) => {
+  const { name, id } = req.params;
+  const username = req.session.user.username;
+  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Access denied' });
+  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
+  let entries = await readEntries(binPath, name);
+  const doc = entries.find(e => e.id === id);
+  if (!doc) return res.status(404).json({ error: 'Document not found' });
+  entries = entries.filter(e => e.id !== id);
+
+  const filePath = doc.meta?.filePath || doc.meta?.href;
+  if (filePath && fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch (e) { console.error('Failed to delete file:', e); }
+  }
+
+  await writeEntries(binPath, entries);
+  res.json({ message: 'Document deleted', id });
+}));
+
+// --- GLOBAL USER MANAGEMENT (admin only) ---
+
+app.get('/api/admin/users', loggedIn, requireAdmin, asyncRoute(async (req, res) => {
+  const users = [];
+  for (const [username, data] of Hive.users) {
+    const dbs = data.databases || [];
+    users.push({ user: username, roles: data.roles, databases: Array.isArray(dbs) ? normalizeDbAccess(dbs) : [] });
+  }
+  res.json(users);
+}));
+
+app.post('/api/admin/users', loggedIn, requireAdmin, asyncRoute(async (req, res) => {
+  const { user, password, roles, databases } = req.body;
+  if (!user || !password) return res.status(400).json({ error: 'user and password required' });
+  if (Hive.users.has(user)) return res.status(409).json({ error: 'User already exists' });
+  const salt = crypto.randomBytes(8).toString('hex');
+  const normalizedDbs = Array.isArray(databases) ? databases.map(d => {
+    if (typeof d === 'string') return { name: d, access: 'read' };
+    return { name: d.name, access: d.access || 'read' };
+  }) : [];
+  Hive.users.set(user, {
+    password: hashPassword(password, salt),
+    salt,
+    roles: roles || ['read'],
+    databases: normalizedDbs
+  });
+  saveGlobalUsers();
+  res.json({ user, roles: roles || ['read'], databases: normalizedDbs });
+}));
+
+app.delete('/api/admin/users/:username', loggedIn, requireAdmin, asyncRoute(async (req, res) => {
+  const { username } = req.params;
+  if (!Hive.users.has(username)) return res.status(404).json({ error: 'User not found' });
+  Hive.users.delete(username);
+  saveGlobalUsers();
+  res.json({ message: 'User deleted' });
+}));
+
+app.put('/api/admin/users/:username/databases', loggedIn, requireAdmin, asyncRoute(async (req, res) => {
+  const { username } = req.params;
+  const { databases } = req.body;
+  if (!Hive.users.has(username)) return res.status(404).json({ error: 'User not found' });
+  const userData = Hive.users.get(username);
+  const normalizedDbs = Array.isArray(databases) ? databases.map(d => {
+    if (typeof d === 'string') return { name: d, access: 'read' };
+    return { name: d.name, access: d.access || 'read' };
+  }) : [];
+  userData.databases = normalizedDbs;
+  saveGlobalUsers();
+  res.json({ user: username, databases: normalizedDbs });
+}));
+
+// Update user password/roles (admin only)
+app.put('/api/admin/users/:username', loggedIn, requireAdmin, asyncRoute(async (req, res) => {
+  const { username } = req.params;
+  const { password, roles } = req.body;
+  if (!Hive.users.has(username)) return res.status(404).json({ error: 'User not found' });
+  const userData = Hive.users.get(username);
+  if (password) {
+    const salt = crypto.randomBytes(8).toString('hex');
+    userData.password = hashPassword(password, salt);
+    userData.salt = salt;
+  }
+  if (roles) userData.roles = roles;
+  userData.databases = normalizeDbAccess(userData.databases);
+  saveGlobalUsers();
+  res.json({ user: username, roles: userData.roles, databases: userData.databases || [] });
+}));
+
+// --- END USER MANAGEMENT ---
+
+// Init Hive and create default admin user
+async function initHive() {
+  // Load global users from dedicated JSON file (survives restarts)
+  loadGlobalUsers();
+
+  if (Hive.users.size === 0) {
+    const salt = Hive.generateSalt();
+    Hive.users.set('admin', {
+      password: Hive.hashPassword('admin', salt),
+      salt,
+      roles: ['root'],
+      databases: []
+    });
+    saveGlobalUsers();
+    console.log('Default admin user created (password: admin)');
+  }
+}
+
+app.get('/', (req, res) => {
+  res.render('login', { baseurl: '', title: 'Login', error: null });
+});
+
+// --- MCP (Model Context Protocol) remote endpoint ---
+
+const mcpTools = [
+  {
+    name: "hive_find",
+    description: "Vector similarity search (requires auth via username/password)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Text query" },
+        dbName: { type: "string", description: "Database to search" },
+        topK: { type: "number", description: "Number of results (default: 10)" },
+        username: { type: "string", description: "Username" },
+        password: { type: "string", description: "Password" }
+      },
+      required: ["query", "dbName", "username", "password"]
+    }
+  },
+  {
+    name: "hive_add_file",
+    description: "Add a file to a database (requires write access)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Path to the file" },
+        dbName: { type: "string", description: "Database name" },
+        username: { type: "string", description: "Username" },
+        password: { type: "string", description: "Password" }
+      },
+      required: ["filePath", "dbName", "username", "password"]
+    }
+  },
+  {
+    name: "hive_auth",
+    description: "Verify credentials and list accessible databases",
+    inputSchema: {
+      type: "object",
+      properties: {
+        username: { type: "string" },
+        password: { type: "string" }
+      },
+      required: ["username", "password"]
+    }
+  }
+];
+
+function mcpOk(data) {
+  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+}
+
+function mcpErr(msg) {
+  return { content: [{ type: "text", text: msg }], isError: true };
+}
+
+const mcpServer = new Server(
+  { name: "hive-mcp", version: "1.4.0" },
+  { capabilities: { tools: {} } }
+);
+
+mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: mcpTools }));
+
+mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+  try {
+    // Ensure users are loaded from hive_users.json
+    loadGlobalUsers();
+
+    switch (name) {
+      case "hive_find": {
+        const { query, dbName, topK, username, password } = args;
+        if (!dbName) return mcpErr("dbName required");
+        Hive.auth(username, password);
+        if (!userCanAccessDb(username, dbName)) return mcpErr(`Access denied to "${dbName}"`);
+        const binPath = path.join(DB_DIR, dbName, `${dbName}.bin`);
+        if (!fs.existsSync(binPath)) return mcpErr(`Database "${dbName}" not found`);
+        Hive.collections.clear();
+        Hive.dbName = dbName;
+        Hive.pathToDB = binPath;
+        Hive.logging = false;
+        await Hive.init({ pathToDB: binPath, dbName, logging: false });
+        Hive.users.clear();
+        const results = await Hive.find(query, topK || 10);
+        return mcpOk(results.map(r => ({
+          id: r.document.id, similarity: r.similarity, meta: r.document.meta, db: dbName
+        })));
+      }
+      case "hive_add_file": {
+        const { filePath, dbName, username, password } = args;
+        if (!dbName) return mcpErr("dbName required");
+        if (!filePath || !fs.existsSync(filePath)) return mcpErr(`File not found: ${filePath}`);
+        Hive.auth(username, password);
+        if (!userCanWriteDb(username, dbName)) return mcpErr(`Write access denied to "${dbName}"`);
+        const binPath = path.join(DB_DIR, dbName, `${dbName}.bin`);
+        if (!fs.existsSync(binPath)) return mcpErr(`Database "${dbName}" not found`);
+        Hive.collections.clear();
+        Hive.dbName = dbName;
+        Hive.pathToDB = binPath;
+        Hive.logging = false;
+        await Hive.init({ pathToDB: binPath, dbName, logging: false });
+        Hive.users.clear();
+        await Hive.addFile(filePath);
+        await Hive.saveToDisk();
+        return mcpOk({ message: `File added to "${dbName}"` });
+      }
+      case "hive_auth": {
+        Hive.auth(args.username, args.password);
+        const dbs = getUserDatabases(args.username);
+        const user = Hive.users.get(args.username);
+        return mcpOk({ authenticated: true, username: args.username, roles: user.roles, databases: dbs });
+      }
+      default:
+        return mcpErr(`Unknown tool: ${name}`);
+    }
+  } catch (e) {
+    return mcpErr(e.message);
+  }
+});
+
+// SSE transport for MCP — one connection at a time
+let mcpSseTransport = null;
+
+app.get('/mcp/sse', async (req, res) => {
+  mcpSseTransport = new SSEServerTransport('/mcp/message', res);
+  await mcpServer.connect(mcpSseTransport);
+});
+
+app.post('/mcp/message', async (req, res) => {
+  if (mcpSseTransport) {
+    await mcpSseTransport.handlePostMessage(req, res);
+  }
+});
+
+app.get('/admin', loggedIn, requireAdmin, (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'index.html'));
+});
+
+app.use('/admin', express.static(path.join(__dirname, 'admin')));
 app.use(express.static(path.join(__dirname, 'admin')));
 
 app.use((err, req, res, next) => {
@@ -424,6 +1114,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Hive Admin: http://localhost:${PORT}`);
+  try {
+    await Hive.init({ logging: false, pathToDB: path.join(DB_DIR, 'Main', 'Main.bin') });
+    await initHive();
+  } catch (e) {
+    console.error('Hive init error:', e.message);
+  }
 });
