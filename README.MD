@@ -28,6 +28,10 @@ node scripts/import-folders.js  → Batch import docs/ → databases
 ## Quick Start
 
 ```bash
+# From npm
+npx @deonis/hive
+
+# Or from source
 git clone https://github.com/dspasyuk/hive.git
 cd hive
 npm install
