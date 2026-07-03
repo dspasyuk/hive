@@ -7,8 +7,8 @@ __pycache__/
 uploads/
 versions/
 debug/
-docs/
-img/
+/docs/
+/img/
 test_db_mcp/
 sessions/
 tests/*.bak
