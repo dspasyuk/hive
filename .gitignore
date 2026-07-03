@@ -10,6 +10,7 @@ debug/
 docs/
 img/
 test_db_mcp/
+sessions/
 tests/*.bak
 tests/reproduce_*
 tests/test_custom_models.js
