@@ -4,10 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hive Admin</title>
+<link rel="icon" type="image/svg+xml" href="/img/docusearch.svg">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; display: flex; min-height: 100vh; background: #f5f5f7; color: #1d1d1f; }
-.sidebar { width: 260px; height: 100vh; position: sticky; top: 0; background: #1d1d1f; color: #f5f5f7; padding: 20px; display: flex; flex-direction: column; }
+.sidebar { width: 300px; height: 100vh; position: sticky; top: 0; background: #1d1d1f; color: #f5f5f7; padding: 20px; display: flex; flex-direction: column; }
 .sidebar h1 { font-size: 18px; font-weight: 600; margin-bottom: 20px; }
 .sidebar h1 small { font-size: 11px; opacity: .5; font-weight: 400; display: block; margin-top: 2px; }
 .db-list { flex: 1; overflow-y: auto; }
@@ -89,6 +90,35 @@ tr:hover td { background: #f5f5f7; }
 .search-mode.active { background:#0071e3; color:#fff; }
 .error { color: #ff3b30; padding: 8px 0; font-size: 13px; }
 .success { color: #30b158; padding: 8px 0; font-size: 13px; }
+
+/* 1. Base scrollbar sizing */
+::-webkit-scrollbar {
+  width: 8px;  /* Slightly wider for better usability, but visually slimmed down by the border trick below */
+  height: 8px; 
+}
+
+/* 2. Track (the runway) */
+::-webkit-scrollbar-track {
+  background: transparent; 
+}
+
+/* 3. Thumb (the draggable handle) */
+::-webkit-scrollbar-thumb {
+  background-color: rgba(100, 100, 100, 0.8); /* Using transparency allows it to look good over dark OR light backgrounds */
+  border-radius: 10px;
+  
+  /* The Secret Sauce: A transparent border + padding-box clipping 
+     creates a floating, inset effect without making the click-zone too small */
+  border: 2px solid transparent;
+  background-clip: padding-box; 
+}
+
+/* 4. Hover state */
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.35); /* Soft darken on hover */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
 @media (max-width: 768px) { .sidebar { width: 100%; position: fixed; bottom: 0; z-index: 10; flex-direction: row; padding: 10px; height: auto; } .sidebar h1 { display: none; } .db-list { display: flex; gap: 4px; } .db-item { white-space: nowrap; } .main { margin-bottom: 60px; } }
 </style>
 </head>
@@ -115,9 +145,12 @@ tr:hover td { background: #f5f5f7; }
     </div>
     <div class="panel active" id="panel-overview">
       <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
           <h2 id="dbTitle"></h2>
-          <button class="btn btn-danger btn-sm" onclick="dropDatabase()">Drop Database</button>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-sm" style="background:#ff9f0a;color:#fff" onclick="rebuildDatabase()">Rebuild Database</button>
+            <button class="btn btn-danger btn-sm" onclick="dropDatabase()">Drop Database</button>
+          </div>
         </div>
         <div class="stat-grid" id="statGrid"></div>
       </div>
@@ -203,6 +236,37 @@ tr:hover td { background: #f5f5f7; }
         <div class="form-row" style="align-items:flex-start"><label>Databases</label><div id="editDbAccessList"></div></div>
         <div id="editUserMessage"></div>
         <button class="btn" onclick="saveEditUser()" style="margin-top:8px">Save Changes</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-overlay" id="rebuildModal">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:500px">
+      <div class="modal-header">
+        <h3 id="rebuildTitle">Rebuilding Database</h3>
+        <button class="modal-close" onclick="closeRebuild()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="rebuildStatus" style="margin-bottom:16px;font-size:14px;color:#6e6e73">Starting...</div>
+        <div id="rebuildProgressContainer" style="background:#e8e8ed;border-radius:8px;overflow:hidden;height:24px;margin-bottom:12px">
+          <div id="rebuildProgressBar" style="background:#ff9f0a;height:100%;width:0%;transition:width .3s;border-radius:8px"></div>
+        </div>
+        <div id="rebuildMessages" style="max-height:200px;overflow-y:auto;font-size:12px;color:#6e6e73"></div>
+        <button id="rebuildDoneBtn" class="btn" style="display:none;margin-top:12px" onclick="closeRebuild()">Done</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-overlay" id="newDbModal">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:450px">
+      <div class="modal-header">
+        <h3>Create New Database</h3>
+        <button class="modal-close" onclick="closeNewDb()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row"><label>Name</label><input type="text" id="newDbName" placeholder="Database name" style="flex:1"></div>
+        <div class="form-row" style="align-items:flex-start"><label>Docs Path</label><input type="text" id="newDbPath" placeholder="Optional: /path/to/documents" style="flex:1"></div>
+        <div style="font-size:12px;color:#6e6e73;margin-bottom:12px">Leave path empty to create an empty database. Files from the path will be imported on creation.</div>
+        <button class="btn" onclick="createNewDb()">Create</button>
+        <div id="newDbMessage" style="margin-top:8px;font-size:13px"></div>
       </div>
     </div>
   </div>
@@ -533,14 +597,92 @@ async function semanticSearch() {
   }
 }
 
-async function newDatabase() {
-  const name = prompt('New database name:');
-  if (!name) return;
-  await api('/api/databases', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ name })
-  });
-  await loadDatabases();
+// --- Rebuild Database ---
+async function rebuildDatabase() {
+  if (!confirm('Rebuild will re-process ALL documents in this database. This can take a very long time depending on the number of files.\n\nAre you sure you want to proceed?')) return;
+  document.getElementById('rebuildTitle').textContent = 'Rebuilding: ' + currentDb;
+  document.getElementById('rebuildStatus').textContent = 'Starting...';
+  document.getElementById('rebuildProgressBar').style.width = '0%';
+  document.getElementById('rebuildMessages').innerHTML = '';
+  document.getElementById('rebuildDoneBtn').style.display = 'none';
+  document.getElementById('rebuildModal').classList.add('open');
+  try {
+    const { jobId } = await api('/api/databases/' + currentDb + '/rebuild', { method: 'POST' });
+    pollRebuild(jobId);
+  } catch (e) {
+    document.getElementById('rebuildStatus').textContent = 'Error: ' + e.message;
+    document.getElementById('rebuildDoneBtn').style.display = '';
+  }
+}
+
+async function pollRebuild(jobId) {
+  try {
+    const job = await api('/api/rebuild-status/' + jobId);
+    const statusEl = document.getElementById('rebuildStatus');
+    const barEl = document.getElementById('rebuildProgressBar');
+    const msgEl = document.getElementById('rebuildMessages');
+    if (job.total > 0) {
+      const pct = Math.round((job.done / job.total) * 100);
+      barEl.style.width = pct + '%';
+      statusEl.textContent = 'Processing ' + job.done + ' of ' + job.total + ' files (' + pct + '%)';
+    }
+    if (job.warnings && job.warnings.length) {
+      msgEl.innerHTML = job.warnings.slice(-20).map(w => '<div style="color:#ff9f0a;padding:2px 0">' + escHtml(w) + '</div>').join('');
+    }
+    if (job.status === 'complete') {
+      statusEl.textContent = 'Rebuild complete! Processed ' + job.done + ' files.' + (job.warnings.length ? ' (' + job.warnings.length + ' warnings)' : '');
+      barEl.style.width = '100%';
+      document.getElementById('rebuildDoneBtn').style.display = '';
+      await loadOverview();
+      await loadCollections();
+    } else if (job.status === 'error') {
+      statusEl.textContent = 'Rebuild failed: ' + (job.errors.join(', '));
+      document.getElementById('rebuildDoneBtn').style.display = '';
+    } else {
+      setTimeout(() => pollRebuild(jobId), 1000);
+    }
+  } catch (e) {
+    document.getElementById('rebuildStatus').textContent = 'Polling error: ' + e.message;
+    document.getElementById('rebuildDoneBtn').style.display = '';
+  }
+}
+
+function closeRebuild() {
+  document.getElementById('rebuildModal').classList.remove('open');
+}
+
+// --- New Database with path ---
+function newDatabase() {
+  document.getElementById('newDbName').value = '';
+  document.getElementById('newDbPath').value = '';
+  document.getElementById('newDbMessage').textContent = '';
+  document.getElementById('newDbModal').classList.add('open');
+}
+
+function closeNewDb() {
+  document.getElementById('newDbModal').classList.remove('open');
+}
+
+async function createNewDb() {
+  const name = document.getElementById('newDbName').value.trim();
+  const docsPath = document.getElementById('newDbPath').value.trim();
+  const msg = document.getElementById('newDbMessage');
+  if (!name) { msg.className = 'error'; msg.textContent = 'Database name required'; return; }
+  msg.className = '';
+  msg.textContent = 'Creating...';
+  try {
+    const body = { name };
+    if (docsPath) body.path = docsPath;
+    await api('/api/databases', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    closeNewDb();
+    await loadDatabases();
+  } catch (e) {
+    msg.className = 'error';
+    msg.textContent = e.message;
+  }
 }
 
 async function newCollection() {

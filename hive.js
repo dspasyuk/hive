@@ -17,6 +17,14 @@ import crypto from "crypto";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Shared, byte-bounded LRU cache of decoded database indexes. Indexes are
+// read-only projections of a .bin file (metadata + Float32 vectors + counts),
+// keyed by path and invalidated when the file's mtime/size change.
+const INDEX_CACHE_MAX_BYTES = Number(process.env.HIVE_INDEX_CACHE_BYTES || 1024 * 1024 * 1024);
+const indexCache = new Map();
+const indexCacheInflight = new Map();
+let indexCacheBytes = 0;
+
 class Hive {
   static collections = new Map();
   static pipelines = {};
@@ -53,6 +61,7 @@ class Hive {
   static SliceSize = 512;
   static minSliceSize = 100;
   static saveInterval = 5000;
+  static embedBatchSize = 32;
   
   // Updated models for better accuracy
   static models = {
@@ -319,12 +328,12 @@ class Hive {
       const magnitude = Hive.normalize(vector);
       Hive.log("Inserting entry:", entry.meta.title);
       Hive.collections.get(Hive.dbName).push({
-        vector,
+        vector: Hive.toFloat32(vector),
         magnitude,
         meta,
         id: Hive.randomId(),
       });
-      Hive.saveToDisk();
+      // Save handled by caller (import-folders.js)
     }
   }
 
@@ -343,7 +352,7 @@ class Hive {
       for (let i = 0; i < entries.length; i++) {
         const { vector, meta } = entries[i];
         collection.push({
-          vector: vector,
+          vector: Hive.toFloat32(vector),
           meta,
           magnitude: Hive.normalize(vector),
           id: Hive.randomId(),
@@ -583,6 +592,181 @@ class Hive {
   }
 
   /**
+   * Stream-decode a .bin file into a read-only index: entries (metadata +
+   * Float32 vectors + precomputed magnitudes), per-collection counts, and
+   * dimension summary. Does not touch Hive.collections or load models.
+   */
+  static buildIndex(binPath, defaultCollection) {
+    return new Promise((resolve, reject) => {
+      const entries = [];
+      const collections = new Map();
+      let bytes = 0;
+      if (!fs.existsSync(binPath)) {
+        return resolve({ entries, collections, count: 0, bytes: 0, dims: [] });
+      }
+      const readStream = fs.createReadStream(binPath);
+      const unpacker = new UnpackrStream({ structuredClone: true });
+      readStream.pipe(unpacker)
+        .on('data', (rec) => {
+          if (!rec || typeof rec !== 'object') return;
+          const coll = rec.collection || defaultCollection || 'default';
+          const vec = rec.vector && rec.vector.length ? Hive.toFloat32(rec.vector) : null;
+          const entry = {
+            id: rec.id,
+            collection: coll,
+            meta: rec.meta || {},
+            vector: vec,
+            magnitude: vec
+              ? (typeof rec.magnitude === 'number' && rec.magnitude ? rec.magnitude : Hive.normalize(vec))
+              : 0,
+          };
+          if (rec._type !== undefined) entry._type = rec._type;
+          if (rec.data !== undefined) entry.data = rec.data;
+          entries.push(entry);
+          bytes += (vec ? vec.byteLength : 0) + 96
+            + (entry.meta.content ? entry.meta.content.length * 2 : 0)
+            + (entry.meta.title ? entry.meta.title.length * 2 : 0)
+            + (entry.meta.filePath ? entry.meta.filePath.length * 2 : 0);
+          if (coll !== '__hive__') {
+            let c = collections.get(coll);
+            if (!c) { c = { count: 0, types: new Set() }; collections.set(coll, c); }
+            c.count++;
+            if (entry.meta.type) c.types.add(entry.meta.type);
+          }
+        })
+        .on('end', () => {
+          let count = 0;
+          const dims = new Set();
+          for (const e of entries) {
+            if (e.collection === '__hive__') continue;
+            count++;
+            if (e.vector) dims.add(e.vector.length);
+          }
+          resolve({ entries, collections, count, bytes, dims: [...dims] });
+        })
+        .on('error', reject);
+    });
+  }
+
+  /**
+   * Return a cached index for a .bin file, rebuilding it only when the file's
+   * mtime/size change. Concurrent callers share one build.
+   */
+  static async getIndex(binPath, defaultCollection) {
+    let st;
+    try { st = fs.statSync(binPath); } catch {
+      return { entries: [], collections: new Map(), count: 0, bytes: 0, dims: [] };
+    }
+
+    const hit = indexCache.get(binPath);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+      indexCache.delete(binPath);
+      indexCache.set(binPath, hit);
+      return hit.index;
+    }
+
+    let pending = indexCacheInflight.get(binPath);
+    if (!pending) {
+      pending = Hive.buildIndex(binPath, defaultCollection);
+      indexCacheInflight.set(binPath, pending);
+      const clear = () => {
+        if (indexCacheInflight.get(binPath) === pending) indexCacheInflight.delete(binPath);
+      };
+      pending.then(clear, clear);
+    }
+    const index = await pending;
+
+    const existing = indexCache.get(binPath);
+    if (existing && existing.mtimeMs === st.mtimeMs && existing.size === st.size) {
+      return existing.index;
+    }
+    if (existing) indexCacheBytes -= existing.index.bytes;
+    indexCache.set(binPath, { mtimeMs: st.mtimeMs, size: st.size, index });
+    indexCacheBytes += index.bytes;
+    Hive._evictIndexCache(binPath);
+    return index;
+  }
+
+  static _evictIndexCache(pinned) {
+    for (const [key, value] of indexCache) {
+      if (indexCacheBytes <= INDEX_CACHE_MAX_BYTES) break;
+      if (key === pinned) continue;
+      indexCache.delete(key);
+      indexCacheBytes -= value.index.bytes;
+    }
+  }
+
+  static invalidateIndex(binPath) {
+    const hit = indexCache.get(binPath);
+    if (hit) {
+      indexCache.delete(binPath);
+      indexCacheBytes -= hit.index.bytes;
+    }
+  }
+
+  static clearIndexCache() {
+    indexCache.clear();
+    indexCacheInflight.clear();
+    indexCacheBytes = 0;
+  }
+
+  static indexCacheStats() {
+    return { entries: indexCache.size, bytes: indexCacheBytes, maxBytes: INDEX_CACHE_MAX_BYTES };
+  }
+
+  /**
+   * Cosine search over an index (or any { entries } collection) with a
+   * precomputed query vector. Uses a bounded min-heap so only the current
+   * top-K candidates are tracked — no per-entry allocation, no full sort.
+   */
+  static searchVector(index, queryVec, topK = 10) {
+    const q = Hive.toFloat32(queryVec);
+    if (!q) return [];
+    const qmag = Hive.normalize(q);
+    if (!qmag) return [];
+    const k = Math.max(1, topK | 0);
+    const qLen = q.length;
+    const heap = [];
+    for (const e of index.entries) {
+      const v = e.vector;
+      if (!v || v.length !== qLen) continue;
+      let dot = 0;
+      for (let i = 0; i < qLen; i++) dot += q[i] * v[i];
+      const similarity = dot / (qmag * (e.magnitude || 1));
+      if (heap.length < k) {
+        heap.push({ document: e, similarity });
+        Hive._heapSiftUp(heap, heap.length - 1);
+      } else if (similarity > heap[0].similarity) {
+        heap[0] = { document: e, similarity };
+        Hive._heapSiftDown(heap, 0, heap.length);
+      }
+    }
+    return heap.sort((a, b) => b.similarity - a.similarity);
+  }
+
+  static _heapSiftUp(heap, i) {
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (heap[parent].similarity <= heap[i].similarity) break;
+      [heap[parent], heap[i]] = [heap[i], heap[parent]];
+      i = parent;
+    }
+  }
+
+  static _heapSiftDown(heap, i, size) {
+    for (;;) {
+      const left = 2 * i + 1;
+      const right = left + 1;
+      let smallest = i;
+      if (left < size && heap[left].similarity < heap[smallest].similarity) smallest = left;
+      if (right < size && heap[right].similarity < heap[smallest].similarity) smallest = right;
+      if (smallest === i) break;
+      [heap[smallest], heap[i]] = [heap[i], heap[smallest]];
+      i = smallest;
+    }
+  }
+
+  /**
    * Find similar vectors with optional Re-ranking
    * @param {Array|string} queryInput - Vector or text
    * @param {number} topK 
@@ -592,36 +776,25 @@ class Hive {
     Hive.checkAuth("find");
     let queryVector = queryInput;
     let queryText = "";
-    
+
     // Auto-detect if input is text string, store it for re-ranking
     if (typeof queryInput === "string") {
         queryText = queryInput;
         queryVector = await Hive.embed(queryInput, "text");
     }
 
-    const queryVectorMag = Hive.normalize(queryVector);
     const collection = Hive.collections.get(Hive.dbName) || [];
-    let results = [];
-    
-    // 1. Initial Retrieval (Cosine Similarity)
-    for (let i = 0; i < collection.length; i++) {
-      const item = collection[i];
-      if (item.vector.length === queryVector.length) {
-          const similarity = Hive.cosineSimilarity(queryVector, item.vector, queryVectorMag, item.magnitude);
-          results.push({ document: item, similarity });
-      }
-    }
-    
-    // Sort by Cosine Similarity
-    results.sort((a, b) => b.similarity - a.similarity);
+    const shouldRerank = Hive.useRerank && Hive.pipelines.reranker && queryText;
+
+    // 1. Initial Retrieval (Cosine Similarity) over the in-memory collection
+    const pool = shouldRerank ? topK * 3 : topK;
+    const results = Hive.searchVector({ entries: collection }, queryVector, pool);
 
     // 2. Re-ranking (Cross Encoder)
-    if (Hive.useRerank && Hive.pipelines.reranker && queryText) {
-        // Fetch a larger candidate pool (3x topK) to rerank
-        const candidates = results.slice(0, topK * 3);
+    if (shouldRerank) {
         const rerankedResults = [];
 
-        for (const res of candidates) {
+        for (const res of results) {
             // Truncate doc text to ~1000 chars to fit context window
             const docText = res.document.meta.content ? res.document.meta.content.slice(0, 1000) : "";
             
@@ -667,6 +840,72 @@ class Hive {
     return Math.sqrt(sum);
   }
 
+  /**
+   * Coerce an embedding result into a Float32Array so vectors are stored
+   * compactly (4 bytes/dim) instead of as boxed JS number arrays.
+   */
+  static toFloat32(vector) {
+    if (vector == null) return vector;
+    if (vector instanceof Float32Array) return vector;
+    if (Array.isArray(vector)) return Float32Array.from(vector);
+    if (ArrayBuffer.isView(vector)) {
+      return new Float32Array(vector.buffer, vector.byteOffset, Math.floor(vector.byteLength / 4));
+    }
+    return vector;
+  }
+
+  static buildTextEntry(vector, chunk, filePath) {
+    const fv = Hive.toFloat32(vector);
+    return {
+      vector: fv,
+      magnitude: Hive.normalize(fv),
+      meta: {
+        content: Hive.escapeChars(chunk),
+        href: filePath,
+        title: Hive.escapeChars(chunk.slice(0, 20)),
+        filePath,
+        type: "text",
+      },
+      id: Hive.randomId(),
+    };
+  }
+
+  /**
+   * Embed and index many text chunks in batches (one pipeline call per batch
+   * instead of one per chunk) — the dominant cost when importing large files.
+   */
+  static async addTextChunks(chunks, filePath) {
+    if (!chunks.length) return;
+    if (!Hive.pipelines.text) await Hive.initTransformers();
+    const collection = Hive.collections.get(Hive.dbName);
+    if (!collection) return;
+    const batchSize = Hive.embedBatchSize > 0 ? Hive.embedBatchSize : 32;
+
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+      let data, dim;
+      try {
+        const out = await Hive.pipelines.text(batch, Hive.TransOptions);
+        data = out.data || out;
+        if (out.dims && out.dims.length >= 2) {
+          dim = out.dims[out.dims.length - 1];
+        } else {
+          dim = Math.floor(data.length / batch.length);
+        }
+      } catch (e) {
+        // Fall back to one-by-one if the batch pipeline call fails
+        for (const chunk of batch) {
+          const single = await Hive.pipelines.text(chunk, Hive.TransOptions);
+          collection.push(Hive.buildTextEntry(single.data || single, chunk, filePath));
+        }
+        continue;
+      }
+      for (let b = 0; b < batch.length; b++) {
+        collection.push(Hive.buildTextEntry(data.slice(b * dim, (b + 1) * dim), batch[b], filePath));
+      }
+    }
+  }
+
   static tokenCount(text) {
     const tokens = text.match(/\b\w+\b/g) || [];
     return [tokens, tokens.length];
@@ -677,12 +916,11 @@ class Hive {
     try {
       const ext = path.extname(filePath).toLowerCase();
       if (Hive.documents.text.includes(ext)) {
-          const { text } = await doc2txt.extractTextFromFile(filePath);
-          if (typeof text === 'string' && text.trim().length > 0) {
-            await Hive.addItem(text, filePath, "text", filename);
-          }
+          await Hive.readFile(filePath, "text");
+          await Hive.saveToDisk();
       } else if (Hive.documents.image.includes(ext)) {
           await Hive.addItem("", filePath, "image", filename);
+          await Hive.saveToDisk();
       }
     } catch (error) {
       console.error("Error adding file:", error);
@@ -706,7 +944,7 @@ class Hive {
       const actualTitle = filename || (type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`);
 
       Hive.insertOne({
-        vector: Array.isArray(vectorData) ? vectorData : Array.from(vectorData),
+        vector: Hive.toFloat32(vectorData),
         meta: {
           content: type === "text" ? Hive.escapeChars(input) : `Image: ${path.basename(filePath)}`,
           href: filePath,
@@ -737,9 +975,9 @@ class Hive {
             const stats = await fs.promises.stat(fullPath);
             if (stats.isDirectory()) {
               await Hive.pullDocuments(fullPath);
-            } else if (Hive.documents.text.includes(ext)) {
+            } else if (Hive.documents.text.includes(ext) && !Hive.fileExistsInDatabase(fullPath)) {
               await Hive.readFile(fullPath, "text");
-            } else if (Hive.documents.image.includes(ext)) {
+            } else if (Hive.documents.image.includes(ext) && !Hive.fileExistsInDatabase(fullPath)) {
               await Hive.readFile(fullPath, "image");
             }
           } catch (error) {
@@ -763,7 +1001,7 @@ class Hive {
 
       let input = "";
       if (type === "text") {
-        const extracted = await doc2txt.extractTextFromFile(filePath);
+        const extracted = await doc2txt.extractTextFromFile(filePath, { fast: true });
         input = extracted.text;
       } else {
           input = filePath; 
@@ -779,7 +1017,7 @@ class Hive {
       const vectorData = result.data || result;
       
       const newEntry = { 
-        vector: Array.isArray(vectorData) ? vectorData : Array.from(vectorData), 
+        vector: Hive.toFloat32(vectorData), 
         meta: { 
             filePath, 
             type,
@@ -845,37 +1083,47 @@ class Hive {
     return collection.some((item) => item.meta.filePath === filePath);
   }
 
-  static async readFile(filePath, type) {
+  /**
+   * Split text into overlapping token windows honoring SliceSize/overlap/
+   * minSliceSize. Pure; reusable by bulk importers.
+   */
+  static chunkText(text, filePath = "") {
+    const [tokens, len] = Hive.tokenCount(text);
+    const chunks = [];
+    let startIndex = 0;
+
+    let overlapTokens = 0;
+    if (Hive.overlap < 1 && Hive.overlap > 0) {
+      overlapTokens = Math.floor(Hive.SliceSize * Hive.overlap);
+    } else {
+      overlapTokens = Math.floor(Hive.overlap);
+    }
+
+    const stride = Math.max(1, Hive.SliceSize - overlapTokens);
+
+    while (startIndex < len) {
+      const endIndex = Math.min(startIndex + Hive.SliceSize, len);
+      const sliceLength = endIndex - startIndex;
+
+      if (sliceLength >= Hive.minSliceSize) {
+        chunks.push(tokens.slice(startIndex, endIndex).join(" "));
+      } else if (sliceLength > 0 && Hive.minSliceSize > 1) {
+        Hive.log(`Skipped ${sliceLength} token slice in ${filePath ? path.basename(filePath) : "text"} (minSliceSize=${Hive.minSliceSize})`);
+      }
+
+      if (endIndex === len) break;
+      startIndex += stride;
+    }
+    return chunks;
+  }
+
+  static async readFile(filePath, type, options = {}) {
     try {
       Hive.log(`Processing: ${path.basename(filePath)}`);
       if (type === "text") {
-        let { text } = await doc2txt.extractTextFromFile(filePath);
-        const [tokens, len] = Hive.tokenCount(text);
-        let startIndex = 0;
-
-        let overlapTokens = 0;
-        if (Hive.overlap < 1 && Hive.overlap > 0) {
-          overlapTokens = Math.floor(Hive.SliceSize * Hive.overlap);
-        } else {
-          overlapTokens = Math.floor(Hive.overlap);
-        }
-
-        const stride = Math.max(1, Hive.SliceSize - overlapTokens);
-
-        while (startIndex < len) {
-          let endIndex = Math.min(startIndex + Hive.SliceSize, len);
-          const sliceLength = endIndex - startIndex;
-
-          if (sliceLength >= Hive.minSliceSize) {
-            const slice = tokens.slice(startIndex, endIndex).join(" ");
-            await Hive.addItem(slice, filePath, type);
-          } else if (sliceLength > 0 && Hive.minSliceSize > 1) {
-            Hive.log(`Skipped ${sliceLength} token slice in ${path.basename(filePath)} (minSliceSize=${Hive.minSliceSize})`);
-          }
-
-          if (endIndex === len) break;
-          startIndex += stride;
-        }
+        const { text } = await doc2txt.extractTextFromFile(filePath, { fast: true, ...options });
+        const chunks = Hive.chunkText(text, filePath);
+        await Hive.addTextChunks(chunks, filePath);
       } else if (type === "image") {
         await Hive.addItem("", filePath, type);
       }

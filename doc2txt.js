@@ -6,7 +6,7 @@ import { parseStringPromise } from 'xml2js';
 import WordExtractor from 'word-extractor';
 import { readPdfText } from 'pdf-text-reader';
 import * as pdfjsLib from 'pdfjs-dist';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { createCanvas, ImageData } from 'canvas';
 // ==================================================================
 // 🔧 POLYFILL: Fix for "Promise.withResolvers is not a function"
@@ -22,11 +22,29 @@ if (typeof Promise.withResolvers === "undefined") {
   };
 }
 
-
+function cleanText(text) {
+  if (!text) return "";
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\x00/g, '')
+    .replace(/Warning:\s*TT:\s*undefined\s*function:\s*\d+/gi, '')
+    .replace(/Error!\s*Bookmark\s*not\s*defined\.?/gi, '')
+    .replace(/[^\S\n]+/g, ' ')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l !== '')
+    .join('\n');
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const standardFontDataUrl = path.join(__dirname, 'node_modules/pdfjs-dist/standard_fonts/');
+const pdfjsDir = path.join(__dirname, 'node_modules/pdfjs-dist');
+const standardFontDataUrl = pathToFileURL(path.join(pdfjsDir, 'standard_fonts/')).href;
+const cMapUrl = pathToFileURL(path.join(pdfjsDir, 'cmaps/')).href;
+const cMapPacked = true;
 
 // ------------------------------------------------------------------
 // HELPER: Timeout Wrapper
@@ -88,13 +106,15 @@ doc2txt.readTextFromTxt = async function (filePath) {
   }
 };
 
-doc2txt.extractPdfMetadata = async function(pdfUrl) {
+doc2txt.extractPdfMetadata = async function(filePath) {
   try {
     // Wrap metadata extraction in a 10s timeout
     return await runWithTimeout(async () => {
       const loadingTask = pdfjsLib.getDocument({
-        url: pdfUrl,
+        url: pathToFileURL(filePath).href,
         standardFontDataUrl: standardFontDataUrl,
+        cMapUrl: cMapUrl,
+        cMapPacked: cMapPacked,
         verbosity: 0 // Suppress warnings
       });
       const pdf = await loadingTask.promise;
@@ -132,13 +152,15 @@ doc2txt.extractPdfMetadata = async function(pdfUrl) {
 // ------------------------------------------------------------------
 // FIXED: Robust Image Extraction
 // ------------------------------------------------------------------
-doc2txt.extractImagesWithMetadataFromPdf = async function(pdfUrl) {
+doc2txt.extractImagesWithMetadataFromPdf = async function(filePath) {
   try {
     // 60 Second timeout for ALL images in a file
     return await runWithTimeout(async () => {
       const loadingTask = pdfjsLib.getDocument({
-        url: pdfUrl,
+        url: pathToFileURL(filePath).href,
         standardFontDataUrl: standardFontDataUrl,
+        cMapUrl: cMapUrl,
+        cMapPacked: cMapPacked,
         verbosity: 0
       });
       const pdf = await loadingTask.promise;
@@ -226,7 +248,7 @@ doc2txt.extractImagesWithMetadataFromPdf = async function(pdfUrl) {
 doc2txt.readTextFromDoc = async function (filePath) {
   try {
     const extractor = new WordExtractor();
-    return (await extractor.extract(filePath)).getBody();
+    return cleanText((await extractor.extract(filePath)).getBody());
   } catch (err) {
     return "";
   }
@@ -252,7 +274,7 @@ doc2txt.readTextFromDocx = async function (filePath) {
         }
       }).filter(Boolean).join(' ');
     }).filter(Boolean).join('\n') || '';
-    return text.trim();
+    return cleanText(text);
   } catch (err) {
     return "";
   }
@@ -267,14 +289,19 @@ doc2txt.readTextFromPdf = async function (filePath, options = {}) {
 
   // 1. Extract Text (Max 30 seconds)
   try {
-    result.text = await runWithTimeout(
-      readPdfText({ url: filePath, verbosity: 0 }), 
-      30000, 
-      "Text Extraction"
-    );
-    console.log(result.text)
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      result.text = cleanText(await runWithTimeout(
+        readPdfText({ url: pathToFileURL(filePath).href, verbosity: 0 }),
+        30000,
+        "Text Extraction"
+      ));
+    } finally {
+      console.warn = warn;
+    }
   } catch (e) {
-    console.error(`❌ Text extraction ERROR for ${path.basename(filePath)}:`, e);
+    console.error(`Text extraction ERROR for ${path.basename(filePath)}:`, e);
   }
 
   // 2. Extract Images (Max 60 seconds) - Run sequentially, not parallel to save RAM
@@ -288,16 +315,18 @@ doc2txt.readTextFromPdf = async function (filePath, options = {}) {
   }
 
   // 3. Extract Metadata (Max 5 seconds)
-  try {
-    result.metadata = await doc2txt.extractPdfMetadata(filePath);
-  } catch (e) {
-    // Ignore metadata failure
+  if (options.includePdfMetadata !== false) {
+    try {
+      result.metadata = await doc2txt.extractPdfMetadata(filePath);
+    } catch (e) {
+      // Ignore metadata failure
+    }
   }
 
   return result;
 };
 
-doc2txt.extractTextFromFile = async function (filePath) {
+doc2txt.extractTextFromFile = async function (filePath, options = {}) {
   const extension = path.extname(filePath).toLowerCase();
   try {
     switch (extension) {
@@ -308,9 +337,12 @@ doc2txt.extractTextFromFile = async function (filePath) {
       case '.docx':
         return { text: await this.readTextFromDocx(filePath), images: [], metadata: null };
       case '.pdf':
-        // NOTE: We now default to including metadata/images. 
-        // Pass options if you want to toggle this behavior.
-        return await this.readTextFromPdf(filePath, { includeImageMetadata: true });
+        // PDF images/metadata are expensive and unused by text indexing, so
+        // they are opt-in (pass { includePdfImages: true } / not fast).
+        return await this.readTextFromPdf(filePath, {
+          includeImageMetadata: options.includePdfImages === true,
+          includePdfMetadata: options.fast !== true && options.includePdfMetadata !== false,
+        });
       default:
         return { text: "", images: [], metadata: null };
     }

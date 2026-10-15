@@ -21,11 +21,40 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_DIR = path.join(process.cwd(), 'db');
 const GLOBAL_USERS_PATH = path.join(DB_DIR, 'hive_users.json');
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3030;
 const app = express();
 
 const upload = multer({ dest: 'uploads/' });
 const FileStoreSession = FileStore(session);
+
+function dbBinPath(name) {
+  return path.join(DB_DIR, name, `${name}.bin`);
+}
+
+// Convert a cached index entry into a JSON-safe API document (vectors are
+// Float32Array in the index, which JSON.stringify turns into an object).
+function serializeDoc(doc, dbName) {
+  const out = {
+    id: doc.id,
+    collection: doc.collection,
+    meta: doc.meta,
+    magnitude: doc.magnitude,
+    vector: doc.vector ? Array.from(doc.vector) : [],
+  };
+  if (dbName) out._db = dbName;
+  return out;
+}
+
+// CLIP text embedding for text->image search (model cached on the process).
+async function clipTextEmbedding(text) {
+  if (!global.__clipTextModel) {
+    global.__clipTextModel = await CLIPTextModelWithProjection.from_pretrained(Hive.models.image);
+    global.__clipTokenizer = await AutoTokenizer.from_pretrained(Hive.models.image);
+  }
+  const inputs = await global.__clipTokenizer(text, { padding: true, truncation: true });
+  const out = await global.__clipTextModel(inputs);
+  return Hive.toFloat32(Array.from(out.text_embeds.data));
+}
 
 function asyncRoute(fn) {
   return (req, res, next) => fn(req, res, next).catch(next);
@@ -49,8 +78,6 @@ app.use(session({
 app.use((req, res, next) => {
   if (req.session?.user?.username) {
     Hive.currentUser = req.session.user.username;
-  } else {
-    Hive.currentUser = null;
   }
   next();
 });
@@ -101,6 +128,7 @@ function writeEntries(binPath, entries) {
     ws.on('finish', () => {
       if (streamError) return reject(streamError);
       fs.renameSync(tmp, binPath);
+      Hive.invalidateIndex(binPath);
       resolve();
     });
   });
@@ -231,25 +259,63 @@ app.get('/api/databases', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/databases', asyncRoute(async (req, res) => {
-  const { name } = req.body;
+  const { name, path: docsPath } = req.body;
   if (!name) return res.status(400).json({ error: 'Database name required' });
   const dir = path.join(DB_DIR, name);
   const binPath = path.join(dir, name + '.bin');
   if (fs.existsSync(binPath)) return res.status(409).json({ error: 'Database already exists' });
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(binPath, Buffer.alloc(0));
+  Hive.invalidateIndex(binPath);
   const username = req.session?.user?.username;
   if (username && Hive.users.has(username)) {
     const user = Hive.users.get(username);
     if (!user.databases) user.databases = [];
     user.databases = normalizeDbAccess(user.databases);
     if (!user.databases.find(d => d.name === name)) {
-      const access = (user.roles?.includes('root') || user.roles?.includes('dbOwner')) ? 'readWrite' : 'readWrite';
-      user.databases.push({ name, access });
+      user.databases.push({ name, access: 'readWrite' });
     }
     saveGlobalUsers();
   }
-  res.json({ message: 'Database created', name });
+  const imported = [];
+  if (docsPath && fs.existsSync(docsPath)) {
+    const prevMinSlice = Hive.minSliceSize;
+    Hive.minSliceSize = 1;
+    try {
+      Hive.dbName = name;
+      Hive.pathToDB = binPath;
+      Hive.logging = false;
+      if (!Hive.overlap || Hive.overlap === 0) {
+        Hive.overlap = Math.floor(Hive.SliceSize * 0.05);
+      }
+      Hive.collections.clear();
+      Hive.createCollection(name);
+      Hive.currentUser = username;
+      const stat = fs.statSync(docsPath);
+      if (stat.isDirectory()) {
+        await Hive.pullDocuments(docsPath);
+      } else {
+        await Hive.addFile(docsPath, path.basename(docsPath));
+      }
+      const configEntry = {
+        collection: '__hive__',
+        id: '__config__',
+        vector: [],
+        meta: { docsPath, created: new Date().toISOString() },
+        magnitude: 0
+      };
+      Hive.collections.get(name)?.push(configEntry);
+      imported.push(docsPath);
+      await Hive.saveToDisk();
+    } catch (e) {
+      console.error('Import error:', e.message);
+    } finally {
+      Hive.minSliceSize = prevMinSlice;
+      if (Hive.saveTimeout) { clearTimeout(Hive.saveTimeout); Hive.saveTimeout = null; }
+      Hive.collections.clear();
+    }
+  }
+  res.json({ message: 'Database created', name, imported: imported.length });
 }));
 
 app.post('/api/databases/:name/collections', asyncRoute(async (req, res) => {
@@ -321,116 +387,90 @@ app.post('/api/databases/:name/documents', asyncRoute(async (req, res) => {
 
 app.get('/api/databases/:name', asyncRoute(async (req, res) => {
   const { name } = req.params;
-  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  const binPath = dbBinPath(name);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
-  const entries = await readEntries(binPath, name);
-  const collections = {};
-  for (const e of entries) {
-    if (e.collection === '__hive__') continue;
-    if (!collections[e.collection]) collections[e.collection] = [];
-    collections[e.collection].push(e);
-  }
-  const users = entries.find(e => e.collection === '__hive__');
+  const index = await Hive.getIndex(binPath, name);
+  const users = index.entries.find(e => e.collection === '__hive__');
   res.json({
     name,
-    collections: Object.entries(collections).map(([name, entries]) => ({
-      name,
-      count: entries.length
+    collections: [...index.collections.entries()].map(([cname, c]) => ({
+      name: cname,
+      count: c.count
     })),
-    userCount: users ? Object.keys(users.data || {}).length : 0
+    userCount: users && users.data ? Object.keys(users.data).length : 0
   });
 }));
 
 app.get('/api/databases/:name/entries', asyncRoute(async (req, res) => {
   const { name } = req.params;
   const { collection, limit = 50, offset = 0, search, type } = req.query;
-  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  const binPath = dbBinPath(name);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
-  const allEntries = await readEntries(binPath, name);
-  let entries = allEntries.filter(e => e.collection !== '__hive__');
-  if (collection) entries = entries.filter(e => e.collection === collection);
-  if (type) entries = entries.filter(e => e.meta?.type === type);
-  if (search) {
-    const s = search.toLowerCase();
-    entries = entries.filter(e =>
+  const index = await Hive.getIndex(binPath, name);
+  const s = search ? search.toLowerCase() : null;
+  const matched = [];
+  for (let i = index.entries.length - 1; i >= 0; i--) {
+    const e = index.entries[i];
+    if (e.collection === '__hive__') continue;
+    if (collection && e.collection !== collection) continue;
+    if (type && e.meta?.type !== type) continue;
+    if (s && !(
       (e.meta?.title && e.meta.title.toLowerCase().includes(s)) ||
       (e.meta?.content && e.meta.content.toLowerCase().includes(s)) ||
       (e.id && e.id.includes(s))
-    );
+    )) continue;
+    matched.push(e);
   }
-  const total = entries.length;
-  entries.reverse();
-  const page = entries.slice(Number(offset), Number(offset) + Number(limit));
-  for (const e of page) {
-    if (e.vector && !Array.isArray(e.vector)) e.vector = Array.from(e.vector);
-  }
-  res.json({ total, offset: Number(offset), limit: Number(limit), entries: page });
+  const start = Number(offset);
+  const page = matched.slice(start, start + Number(limit)).map(e => ({
+    id: e.id,
+    collection: e.collection,
+    meta: e.meta,
+    magnitude: e.magnitude,
+    vector: e.vector ? Array.from(e.vector) : [],
+  }));
+  res.json({ total: matched.length, offset: start, limit: Number(limit), entries: page });
 }));
 
 app.get('/api/databases/:name/search', asyncRoute(async (req, res) => {
   const { name } = req.params;
   const { q, limit = 25, type } = req.query;
   if (!q) return res.status(400).json({ error: 'Query required (q)' });
-  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  const binPath = dbBinPath(name);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
-  const allEntries = await readEntries(binPath, name);
-  let entries = allEntries.filter(e => e.collection !== '__hive__');
+  const index = await Hive.getIndex(binPath, name);
   const s = q.toLowerCase();
-  const keyword = entries.filter(e =>
-    (e.meta?.title && e.meta.title.toLowerCase().includes(s)) ||
-    (e.meta?.content && e.meta.content.toLowerCase().includes(s)) ||
-    (e.id && e.id.includes(s))
+  const keyword = index.entries.filter(e =>
+    e.collection !== '__hive__' && (
+      (e.meta?.title && e.meta.title.toLowerCase().includes(s)) ||
+      (e.meta?.content && e.meta.content.toLowerCase().includes(s)) ||
+      (e.id && e.id.includes(s))
+    )
   );
   let semantic = [];
   let clipImageResults = [];
   try {
-    Hive.dbName = name;
-    Hive.pathToDB = binPath;
-    Hive.logging = false;
-    Hive.collections.clear();
-    Hive.createCollection(name);
-    const col = Hive.collections.get(name);
-    for (const e of allEntries) {
-      if (e.collection === '__hive__' || !e.vector || !e.vector.length) continue;
-      col.push(e);
-    }
-    const results = await Hive.find(q, Number(limit));
-    semantic = results.map(r => ({
+    const queryVec = await Hive.embed(q, 'text');
+    semantic = Hive.searchVector(index, queryVec, Number(limit)).map(r => ({
       collection: r.document.collection,
       id: r.document.id,
       meta: r.document.meta,
       similarity: r.similarity,
       _source: 'semantic'
     }));
-    const imageEntries = col.filter(e => e.vector && e.meta?.type === 'image');
+    const imageEntries = index.entries.filter(e => e.vector && e.meta?.type === 'image');
     if (imageEntries.length > 0) {
-      if (!global.__clipTextModel) {
-        global.__clipTextModel = await CLIPTextModelWithProjection.from_pretrained(Hive.models.image);
-        global.__clipTokenizer = await AutoTokenizer.from_pretrained(Hive.models.image);
-      }
-      const inputs = await global.__clipTokenizer(q, { padding: true, truncation: true });
-      const out = await global.__clipTextModel(inputs);
-      const queryVec = Array.from(out.text_embeds.data);
-      const qMag = Math.sqrt(queryVec.reduce((s, v) => s + v * v, 0));
-      for (const img of imageEntries) {
-        const vec = Array.from(img.vector);
-        const iMag = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-        let dot = 0;
-        for (let i = 0; i < queryVec.length; i++) dot += queryVec[i] * vec[i];
-        const sim = dot / (qMag * iMag || 1);
-        clipImageResults.push({
-          collection: img.collection, id: img.id, meta: img.meta,
-          similarity: sim, _source: 'clip-image'
-        });
-      }
-      clipImageResults.sort((a, b) => b.similarity - a.similarity);
-      clipImageResults = clipImageResults.slice(0, Number(limit));
+      const clipVec = await clipTextEmbedding(q);
+      clipImageResults = Hive.searchVector({ entries: imageEntries }, clipVec, Number(limit)).map(r => ({
+        collection: r.document.collection,
+        id: r.document.id,
+        meta: r.document.meta,
+        similarity: r.similarity,
+        _source: 'clip-image'
+      }));
     }
   } catch (e) {
     console.error('Search error:', e.message);
-  } finally {
-    if (Hive.saveTimeout) { clearTimeout(Hive.saveTimeout); Hive.saveTimeout = null; }
-    Hive.collections.clear();
   }
   const seen = new Set();
   const merged = [];
@@ -446,10 +486,10 @@ app.get('/api/databases/:name/search', asyncRoute(async (req, res) => {
 
 app.get('/api/databases/:name/users', asyncRoute(async (req, res) => {
   const { name } = req.params;
-  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  const binPath = dbBinPath(name);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
-  const entries = await readEntries(binPath, name);
-  const hiveEntry = entries.find(e => e.collection === '__hive__');
+  const index = await Hive.getIndex(binPath, name);
+  const hiveEntry = index.entries.find(e => e.collection === '__hive__');
   const users = hiveEntry ? Object.entries(hiveEntry.data || {}).map(([user, data]) => ({
     user, roles: data.roles
   })) : [];
@@ -516,6 +556,7 @@ app.post('/api/databases/upload', asyncRoute(async (req, res) => {
   const binPath = path.join(dir, dbName + '.bin');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(binPath, Buffer.from(data, 'base64'));
+  Hive.invalidateIndex(binPath);
   res.json({ message: 'Database imported', name: dbName, size: Buffer.byteLength(data, 'base64') });
 }));
 
@@ -533,6 +574,7 @@ app.delete('/api/databases/:name', asyncRoute(async (req, res) => {
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
   fs.unlinkSync(binPath);
   try { fs.rmdirSync(dir); } catch {}
+  Hive.invalidateIndex(binPath);
   res.json({ message: 'Database deleted' });
 }));
 
@@ -567,18 +609,11 @@ app.post('/api/databases/:name/entries/delete', loggedIn, asyncRoute(async (req,
 
 app.get('/api/databases/:name/collections', asyncRoute(async (req, res) => {
   const { name } = req.params;
-  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  const binPath = dbBinPath(name);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
-  const entries = await readEntries(binPath, name);
-  const collections = {};
-  for (const e of entries) {
-    if (e.collection === '__hive__') continue;
-    if (!collections[e.collection]) collections[e.collection] = { count: 0, types: new Set() };
-    collections[e.collection].count++;
-    if (e.meta?.type) collections[e.collection].types.add(e.meta.type);
-  }
-  res.json(Object.entries(collections).map(([name, c]) => ({
-    name, count: c.count, types: [...c.types]
+  const index = await Hive.getIndex(binPath, name);
+  res.json([...index.collections.entries()].map(([cname, c]) => ({
+    name: cname, count: c.count, types: [...c.types]
   })));
 }));
 
@@ -599,30 +634,109 @@ app.get('/api/file', (req, res) => {
   }
 });
 
-// --- SEARCH UI ROUTES ---
+// --- REBUILD DATABASE ---
 
-function loadDbIntoHive(binPath, dbName) {
-  return new Promise((resolve, reject) => {
-    const entries = [];
-    if (!fs.existsSync(binPath)) return resolve([]);
-    const readStream = createReadStream(binPath);
-    const unpackr = new UnpackrStream();
-    readStream.pipe(unpackr)
-      .on('data', entry => { entries.push(entry); })
-      .on('end', () => {
-        Hive.collections.clear();
-        Hive.createCollection(dbName);
-        const col = Hive.collections.get(dbName);
-        for (const e of entries) {
-          if (e.collection === '__hive__' || !e.vector || !e.vector.length) continue;
-          e.collection = dbName;
-          col.push(e);
-        }
-        resolve();
-      })
-      .on('error', reject);
+const rebuildJobs = new Map();
+
+app.post('/api/databases/:name/rebuild', loggedIn, asyncRoute(async (req, res) => {
+  const { name } = req.params;
+  const username = req.session.user.username;
+  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Access denied' });
+
+  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
+
+  const jobId = crypto.randomBytes(8).toString('hex');
+  const job = { status: 'running', total: 0, done: 0, errors: [], warnings: [] };
+  rebuildJobs.set(jobId, job);
+
+  res.json({ jobId, message: 'Rebuild started' });
+
+  processRebuild(jobId, name, binPath, username).catch(e => {
+    job.status = 'error';
+    job.errors.push(e.message);
   });
+}));
+
+app.get('/api/rebuild-status/:jobId', loggedIn, asyncRoute(async (req, res) => {
+  const job = rebuildJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.status === 'complete' || job.status === 'error') {
+    setTimeout(() => rebuildJobs.delete(req.params.jobId), 60000);
+  }
+  res.json(job);
+}));
+
+async function processRebuild(jobId, dbName, binPath, username) {
+  const job = rebuildJobs.get(jobId);
+  if (!job) return;
+
+  const prevMinSlice = Hive.minSliceSize;
+  Hive.minSliceSize = 1;
+
+  try {
+    const entries = await readEntries(binPath, dbName);
+    const configEntry = entries.find(e => e.id === '__config__');
+    const docsPath = configEntry?.meta?.docsPath;
+
+    Hive.dbName = dbName;
+    Hive.pathToDB = binPath;
+    Hive.logging = false;
+    if (!Hive.overlap || Hive.overlap === 0) {
+      Hive.overlap = Math.floor(Hive.SliceSize * 0.05);
+    }
+    Hive.collections.clear();
+    Hive.createCollection(dbName);
+    Hive.currentUser = username;
+
+    if (docsPath && fs.existsSync(docsPath) && fs.statSync(docsPath).isDirectory()) {
+      job.status = 'scanning';
+      job.message = `Re-scanning ${docsPath}...`;
+      await Hive.pullDocuments(docsPath);
+      const col = Hive.collections.get(dbName) || [];
+      col.push(configEntry);
+      job.done = col.filter(e => e.meta?.filePath).length;
+      job.total = job.done;
+    } else {
+      const filePaths = [...new Set(entries.filter(e => e.meta?.filePath).map(e => e.meta.filePath))];
+      const nonFileEntries = entries.filter(e => !e.meta?.filePath);
+      job.total = filePaths.length;
+
+      for (const e of nonFileEntries) {
+        if (e.id !== '__config__') Hive.collections.get(dbName).push(e);
+      }
+
+      for (let i = 0; i < filePaths.length; i++) {
+        const fp = filePaths[i];
+        if (!fs.existsSync(fp)) {
+          job.warnings.push(`File not found: ${fp}`);
+          job.done = i + 1;
+          continue;
+        }
+        try {
+          await Hive.addFile(fp, path.basename(fp));
+        } catch (e) {
+          job.warnings.push(`Failed: ${fp} - ${e.message}`);
+        }
+        job.done = i + 1;
+      }
+    }
+
+    const all = Hive.collections.get(dbName) || [];
+    await writeEntries(binPath, all);
+    job.status = 'complete';
+    if (!job.message) job.message = `Processed ${all.filter(e => e.meta?.filePath).length} files`;
+  } catch (e) {
+    job.status = 'error';
+    job.errors.push(e.message);
+  } finally {
+    Hive.minSliceSize = prevMinSlice;
+    if (Hive.saveTimeout) { clearTimeout(Hive.saveTimeout); Hive.saveTimeout = null; }
+    Hive.collections.clear();
+  }
 }
+
+// --- SEARCH UI ROUTES ---
 
 // Login
 app.get('/login', (req, res) => {
@@ -703,9 +817,12 @@ app.get('/api/search/databases', loggedIn, asyncRoute(async (req, res) => {
   const dbs = getUserDatabases(username);
   const result = [];
   for (const name of dbs) {
-    const binPath = path.join(DB_DIR, name, `${name}.bin`);
-    const entries = await readEntries(binPath, name);
-    const docCount = entries.filter(e => e.collection !== '__hive__').length;
+    const binPath = dbBinPath(name);
+    let docCount = 0;
+    try {
+      const index = await Hive.getIndex(binPath, name);
+      docCount = index.count;
+    } catch { docCount = 0; }
     const access = dbAccessForUser(username, name);
     result.push({ name, documentCount: docCount, access });
   }
@@ -721,42 +838,32 @@ app.post('/api/search', loggedIn, asyncRoute(async (req, res) => {
   const searchDb = dbName === '*' ? null : dbName;
   const dbs = searchDb ? (userCanAccessDb(username, searchDb) ? [searchDb] : []) : getUserDatabases(username);
 
+  const isImageSearch = searchType === 'image';
+  let queryVec = null;
+  let clipVec = null;
+  try {
+    if (isImageSearch) clipVec = await clipTextEmbedding(query);
+    else queryVec = await Hive.embed(query, 'text');
+  } catch (e) {
+    console.error('Query embedding error:', e.message);
+    return res.status(500).json({ error: 'Failed to embed query: ' + e.message });
+  }
+
   let allResults = [];
   for (const name of dbs) {
-    const binPath = path.join(DB_DIR, name, `${name}.bin`);
+    const binPath = dbBinPath(name);
     if (!fs.existsSync(binPath)) continue;
     try {
-      await loadDbIntoHive(binPath, name);
-      Hive.dbName = name;
-      const isImageSearch = searchType === 'image';
+      const index = await Hive.getIndex(binPath, name);
       let results;
       if (isImageSearch) {
-        const imageEntries = (Hive.collections.get(name) || []).filter(e => e.vector && e.meta?.type === 'image');
-        if (!global.__clipTextModel) {
-          global.__clipTextModel = await CLIPTextModelWithProjection.from_pretrained(Hive.models.image);
-          global.__clipTokenizer = await AutoTokenizer.from_pretrained(Hive.models.image);
-        }
-        const inputs = await global.__clipTokenizer(query, { padding: true, truncation: true });
-        const out = await global.__clipTextModel(inputs);
-        const queryVec = Array.from(out.text_embeds.data);
-        const qMag = Math.sqrt(queryVec.reduce((s, v) => s + v * v, 0));
-        const clipResults = [];
-        for (const img of imageEntries) {
-          const vec = Array.from(img.vector);
-          const iMag = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-          let dot = 0;
-          for (let i = 0; i < queryVec.length; i++) dot += queryVec[i] * vec[i];
-          const sim = dot / (qMag * iMag || 1);
-          clipResults.push({ document: img, similarity: sim });
-        }
-        clipResults.sort((a, b) => b.similarity - a.similarity);
-        results = clipResults.slice(0, 25);
+        const imageEntries = index.entries.filter(e => e.vector && e.meta?.type === 'image');
+        results = Hive.searchVector({ entries: imageEntries }, clipVec, 25);
       } else {
-        results = await Hive.find(query, 25);
+        results = Hive.searchVector(index, queryVec, 25);
       }
       for (const r of results) {
-        r.document._db = name;
-        allResults.push(r);
+        allResults.push({ document: serializeDoc(r.document, name), similarity: r.similarity });
       }
     } catch (e) {
       console.error(`Search error in "${name}":`, e.message);
@@ -789,18 +896,12 @@ app.post('/api/search/image', loggedIn, upload.single('image'), asyncRoute(async
     let allResults = [];
 
     for (const name of dbs) {
-      const binPath = path.join(DB_DIR, name, `${name}.bin`);
+      const binPath = dbBinPath(name);
       if (!fs.existsSync(binPath)) continue;
-      const entries = await readEntries(binPath, name);
-      const vectors = entries.filter(e => e.collection !== '__hive__' && e.vector && e.vector.length);
-      const qMag = Math.sqrt(queryVec.reduce((s, v) => s + v * v, 0));
-      for (const entry of vectors) {
-        const vec = Array.from(entry.vector);
-        const iMag = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-        let dot = 0;
-        for (let i = 0; i < queryVec.length; i++) dot += queryVec[i] * vec[i];
-        const sim = dot / (qMag * iMag || 1);
-        allResults.push({ document: { ...entry, _db: name }, similarity: sim });
+      const index = await Hive.getIndex(binPath, name);
+      const results = Hive.searchVector(index, queryVec, 25);
+      for (const r of results) {
+        allResults.push({ document: serializeDoc(r.document, name), similarity: r.similarity });
       }
     }
 
@@ -957,13 +1058,13 @@ async function initHive() {
   if (Hive.users.size === 0) {
     const salt = Hive.generateSalt();
     Hive.users.set('admin', {
-      password: Hive.hashPassword('admin', salt),
+      password: Hive.hashPassword('3030', salt),
       salt,
       roles: ['root'],
       databases: []
     });
     saveGlobalUsers();
-    console.log('Default admin user created (password: admin)');
+    console.log('Default admin user created (password: 3030)');
   }
 }
 
@@ -1044,15 +1145,11 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!dbName) return mcpErr("dbName required");
         Hive.auth(username, password);
         if (!userCanAccessDb(username, dbName)) return mcpErr(`Access denied to "${dbName}"`);
-        const binPath = path.join(DB_DIR, dbName, `${dbName}.bin`);
+        const binPath = dbBinPath(dbName);
         if (!fs.existsSync(binPath)) return mcpErr(`Database "${dbName}" not found`);
-        Hive.collections.clear();
-        Hive.dbName = dbName;
-        Hive.pathToDB = binPath;
-        Hive.logging = false;
-        await Hive.init({ pathToDB: binPath, dbName, logging: false });
-        Hive.users.clear();
-        const results = await Hive.find(query, topK || 10);
+        const index = await Hive.getIndex(binPath, dbName);
+        const queryVec = await Hive.embed(query, 'text');
+        const results = Hive.searchVector(index, queryVec, topK || 10);
         return mcpOk(results.map(r => ({
           id: r.document.id, similarity: r.similarity, meta: r.document.meta, db: dbName
         })));

@@ -1,15 +1,16 @@
 {
   "name": "@deonis/hive",
-  "version": "1.4.7",
+  "version": "1.4.8",
   "description": "Lightweight file-based multimodal vector database and semantic search engine for Node.js with MCP server support",
   "main": "hive.js",
   "bin": {
     "hive": "admin.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/msgpack-vector.test.mjs && node tests/hive-batch.test.mjs && node tests/hive-find.test.mjs && node tests/import-folders.test.mjs && node tests/perf-index.mjs",
     "mcp": "node mcp.js",
-    "import-folders": "node scripts/import-folders.js"
+    "import-folders": "node scripts/import-folders.js",
+    "arxiv-bench": "node scripts/arxiv-bench.mjs"
   },
   "type": "module",
   "author": "Denis Spasyuk",
