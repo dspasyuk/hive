@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="popup-container">
+    <div id="header">
+      <span id="header-title">DocuSearch</span>
+      <button id="config-btn" title="Settings">&#x2699;</button>
+    </div>
+    <div id="search-bar">
+      <input type="text" id="query" placeholder="Search your knowledge base..." />
+      <button id="search">Search</button>
+    </div>
+    <div id="search-type-row" style="padding:4px 8px;font-size:12px;color:#555;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="Use CLIP to match text against image entries">
+        <input type="checkbox" id="search-type-image" />
+        <span>Search images (text-to-image)</span>
+      </label>
+    </div>
+    <div id="toolbar">
+      <button id="add-selection">Add Selection</button>
+      <button id="add-page-snapshot">Page Snapshot</button>
+      <label id="file-label">
+        Upload<input type="file" id="add-file" multiple />
+      </label>
+    </div>
+    <div id="db-selector">
+      <select id="db-select">
+        <option value="*">All databases</option>
+      </select>
+    </div>
+    <div id="config-panel" style="display:none">
+      <div class="config-section">
+        <h3>Server</h3>
+        <label>Server URL</label>
+        <input type="text" id="cfg-server-url" placeholder="http://localhost:3030" />
+      </div>
+      <div class="config-section">
+        <h3>Authentication</h3>
+        <label>Username</label>
+        <input type="text" id="cfg-username" placeholder="username" />
+        <label>Password</label>
+        <input type="password" id="cfg-password" placeholder="password" />
+      </div>
+      <div class="config-section">
+        <h3>Database</h3>
+        <label>Default Database (created on connect)</label>
+        <input type="text" id="cfg-dbname" placeholder="defaults to username" />
+        <label>Rerank results</label>
+        <label class="switch">
+          <input type="checkbox" id="cfg-rerank" />
+          <span class="slider"></span>
+        </label>
+        <button id="cfg-fetch-dbs" style="margin-top:6px;font-size:13px;padding:4px 8px;background:#e8e8e8;border:1px solid #d0d0d0;border-radius:4px;cursor:pointer">Refresh database list</button>
+      </div>
+      <div class="config-actions">
+        <button id="cfg-test-btn">Test Connection</button>
+        <button id="cfg-save-btn" class="btn-primary">Save</button>
+      </div>
+      <div id="cfg-status"></div>
+    </div>
+    <ul id="results"></ul>
+  </div>
+  <script src="floater.js"></script>
+</body>
+</html>

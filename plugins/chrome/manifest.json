@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "DocuSearch",
+  "version": "1.1",
+  "description": "Vector database search interface",
+
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "contextMenus",
+    "storage",
+    "scripting",
+    "sidePanel"
+  ],
+
+  "host_permissions": [
+    "http://localhost:3030/*",
+    "<all_urls>"
+  ],
+
+  "omnibox": { "keyword": "r" },
+
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png"
+  },
+
+  "action": {
+    "default_title": "DocuSearch",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png"
+    }
+  },
+
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+
+  "background": {
+    "service_worker": "service_worker.js"
+  }
+}

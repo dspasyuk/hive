@@ -1,0 +1,49 @@
+{
+  "manifest_version": 2,
+  "browser_specific_settings": {
+    "gecko": {
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+  "name": "DocuSearch",
+  "version": "1.1",
+  "description": "Vector database search interface",
+
+  "permissions": [
+    "activeTab",
+    "http://localhost:3030/*",
+    "<all_urls>",
+    "downloads",
+    "contextMenus",
+    "storage"
+  ],
+
+  "omnibox": { "keyword": "r" },
+
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "64": "icon-64.svg"
+  },
+
+  "browser_action": {
+    "default_title": "DocuSearch",
+    "default_icon": {
+      "32": "icon.svg",
+      "64": "icon-64.svg"
+    }
+  },
+
+  "sidebar_action": {
+    "default_title": "DocuSearch",
+    "default_panel": "floating.html",
+    "default_icon": "icon.svg"
+  },
+
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  }
+}

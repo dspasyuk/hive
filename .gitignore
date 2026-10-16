@@ -6,7 +6,6 @@ npm-pub/
 __pycache__/
 uploads/
 versions/
-plugins/
 debug/
 /docs/
 /img/
