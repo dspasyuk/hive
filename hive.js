@@ -23,6 +23,7 @@ const __dirname = path.dirname(__filename);
 const INDEX_CACHE_MAX_BYTES = Number(process.env.HIVE_INDEX_CACHE_BYTES || 1024 * 1024 * 1024);
 const indexCache = new Map();
 const indexCacheInflight = new Map();
+const keywordCache = new WeakMap();
 let indexCacheBytes = 0;
 
 class Hive {
@@ -341,6 +342,8 @@ class Hive {
     Hive.checkAuth("update");
     if (Hive.collections.has(Hive.dbName)) {
       Hive.findMeta(query, entry);
+      const collection = Hive.collections.get(Hive.dbName);
+      if (collection) keywordCache.delete(collection);
       Hive.saveToDisk();
     }
   }
@@ -714,6 +717,192 @@ class Hive {
     return { entries: indexCache.size, bytes: indexCacheBytes, maxBytes: INDEX_CACHE_MAX_BYTES };
   }
 
+  static tokenize(text) {
+    if (typeof text !== "string" || !text) return [];
+    return text.toLowerCase().match(/[\p{L}\p{N}_]+/gu) || [];
+  }
+
+  /**
+   * Build an in-memory BM25 keyword index over an index's entries. Titles are
+   * weighted more heavily than content so exact title/name matches rank well.
+   */
+  static buildKeywordIndex(entries, options = {}) {
+    const k1 = options.k1 ?? 1.2;
+    const b = options.b ?? 0.75;
+    const titleWeight = options.titleWeight ?? 4;
+    const contentWeight = options.contentWeight ?? 1;
+    const docs = [];
+    const lengths = [];
+    const terms = new Map();
+    const postings = new Map();
+    let totalLength = 0;
+
+    const addTerm = (tf, token, weight) => {
+      let tid = terms.get(token);
+      if (tid === undefined) {
+        tid = terms.size;
+        terms.set(token, tid);
+      }
+      tf.set(tid, (tf.get(tid) || 0) + weight);
+    };
+
+    for (const entry of entries) {
+      if (!entry || entry.collection === "__hive__") continue;
+      const titleTokens = Hive.tokenize(entry.meta?.title);
+      const contentTokens = Hive.tokenize(entry.meta?.content);
+      if (!titleTokens.length && !contentTokens.length) continue;
+
+      const tf = new Map();
+      for (const token of titleTokens) addTerm(tf, token, titleWeight);
+      for (const token of contentTokens) addTerm(tf, token, contentWeight);
+
+      let length = 0;
+      for (const value of tf.values()) length += value;
+      if (!length) continue;
+
+      const docIndex = docs.length;
+      docs.push(entry);
+      lengths.push(length);
+      totalLength += length;
+
+      for (const [tid, freq] of tf) {
+        let posting = postings.get(tid);
+        if (!posting) {
+          posting = [];
+          postings.set(tid, posting);
+        }
+        posting.push(docIndex, freq);
+      }
+    }
+
+    const N = docs.length;
+    return {
+      docs,
+      lengths,
+      terms,
+      postings,
+      N,
+      avgdl: N ? totalLength / N : 0,
+      k1,
+      b,
+    };
+  }
+
+  static getKeywordIndex(index) {
+    if (!index) return null;
+    if (!index.keyword) index.keyword = Hive.buildKeywordIndex(index.entries || []);
+    return index.keyword;
+  }
+
+  static getCollectionKeywordIndex(entries) {
+    let hit = keywordCache.get(entries);
+    if (!hit || hit.length !== entries.length) {
+      hit = { length: entries.length, index: Hive.buildKeywordIndex(entries) };
+      keywordCache.set(entries, hit);
+    }
+    return hit.index;
+  }
+
+  static searchKeyword(index, query, topK = 10) {
+    if (!index) return [];
+    const kw = index.keyword || Hive.getKeywordIndex(index);
+    if (!kw || !kw.N || !query) return [];
+    const queryTokens = Hive.tokenize(query);
+    if (!queryTokens.length) return [];
+
+    const scores = new Map();
+    const seenTerms = new Set();
+    for (const token of queryTokens) {
+      const tid = kw.terms.get(token);
+      if (tid === undefined || seenTerms.has(tid)) continue;
+      seenTerms.add(tid);
+      const posting = kw.postings.get(tid);
+      if (!posting) continue;
+      const df = posting.length / 2;
+      const idf = Math.log(1 + (kw.N - df + 0.5) / (df + 0.5));
+      for (let i = 0; i < posting.length; i += 2) {
+        const docIndex = posting[i];
+        const tf = posting[i + 1];
+        const dl = kw.lengths[docIndex];
+        const denom = tf + kw.k1 * (1 - kw.b + kw.b * (dl / kw.avgdl));
+        const score = idf * ((tf * (kw.k1 + 1)) / denom);
+        scores.set(docIndex, (scores.get(docIndex) || 0) + score);
+      }
+    }
+
+    if (!scores.size) return [];
+    const ranked = [];
+    for (const [docIndex, score] of scores) {
+      ranked.push({ document: kw.docs[docIndex], keywordScore: score });
+    }
+    ranked.sort((a, b) => b.keywordScore - a.keywordScore);
+    return ranked.slice(0, Math.max(1, topK | 0));
+  }
+
+  /**
+   * Reciprocal Rank Fusion. Ranks from each list are combined as
+   * weight / (k + rank + 1), which is robust to differently scaled scores.
+   */
+  static rrfFuse(lists, options = {}) {
+    const k = options.k ?? 60;
+    const weights = options.weights || [];
+    const labels = options.labels || [];
+    const fused = new Map();
+
+    for (let li = 0; li < lists.length; li++) {
+      const list = lists[li];
+      if (!list || !list.length) continue;
+      const weight = weights[li] ?? 1;
+      const label = labels[li] ?? li;
+      for (let rank = 0; rank < list.length; rank++) {
+        const item = list[rank];
+        const doc = item.document || item;
+        if (!doc) continue;
+        const key = `${doc._db || ""}:${doc.id}`;
+        let rec = fused.get(key);
+        if (!rec) {
+          rec = { document: doc, similarity: null, keywordScore: null, rrfScore: 0, sources: [] };
+          fused.set(key, rec);
+        }
+        rec.rrfScore += weight / (k + rank + 1);
+        if (item.similarity != null && (rec.similarity == null || item.similarity > rec.similarity)) {
+          rec.similarity = item.similarity;
+        }
+        if (item.keywordScore != null && (rec.keywordScore == null || item.keywordScore > rec.keywordScore)) {
+          rec.keywordScore = item.keywordScore;
+        }
+        if (!rec.sources.includes(label)) rec.sources.push(label);
+      }
+    }
+
+    return [...fused.values()].sort((a, b) => b.rrfScore - a.rrfScore);
+  }
+
+  static normalizeRrfScores(results) {
+    if (!results.length) return results;
+    const max = results[0].rrfScore || 0;
+    for (const result of results) {
+      result.score = max ? result.rrfScore / max : 0;
+    }
+    return results;
+  }
+
+  static searchHybrid(index, queryVec, queryText, topK = 10, options = {}) {
+    const k = Math.max(1, topK | 0);
+    const candidateK = Math.max(k, options.candidateK || k * 4);
+    const semantic = Hive.searchVector(index, queryVec, candidateK);
+    if (!queryText) return semantic.slice(0, k);
+
+    const keyword = Hive.searchKeyword(index, queryText, candidateK);
+    if (!keyword.length) return semantic.slice(0, k);
+    if (!semantic.length) return keyword.slice(0, k);
+
+    return Hive.rrfFuse([semantic, keyword], {
+      k: options.rrfK ?? 60,
+      weights: options.weights,
+    }).slice(0, k);
+  }
+
   /**
    * Cosine search over an index (or any { entries } collection) with a
    * precomputed query vector. Uses a bounded min-heap so only the current
@@ -786,42 +975,68 @@ class Hive {
     const collection = Hive.collections.get(Hive.dbName) || [];
     const shouldRerank = Hive.useRerank && Hive.pipelines.reranker && queryText;
 
-    // 1. Initial Retrieval (Cosine Similarity) over the in-memory collection
-    const pool = shouldRerank ? topK * 3 : topK;
-    const results = Hive.searchVector({ entries: collection }, queryVector, pool);
+    // 1. Initial Retrieval (hybrid dense + BM25 fused with RRF)
+    const pool = shouldRerank ? Math.max(topK * 4, 50) : topK;
+    const searchIndex = queryText
+      ? { entries: collection, keyword: Hive.getCollectionKeywordIndex(collection) }
+      : { entries: collection };
+    const results = Hive.searchHybrid(searchIndex, queryVector, queryText, pool);
 
-    // 2. Re-ranking (Cross Encoder)
-    if (shouldRerank) {
-        const rerankedResults = [];
-
-        for (const res of results) {
-            // Truncate doc text to ~1000 chars to fit context window
-            const docText = res.document.meta.content ? res.document.meta.content.slice(0, 1000) : "";
-            
-            try {
-                // Cross-encoder scores the pair [Query, Document]
-                const output = await Hive.pipelines.reranker(queryText, { text_pair: docText });
-                
-                // Extract score (handling different pipeline output formats)
-                const score = output[0]?.score || output.score || 0;
-                
-                rerankedResults.push({
-                    document: res.document,
-                    similarity: score, // This is now a relevance score, not cosine
-                    original_similarity: res.similarity 
-                });
-            } catch (err) {
-                // Keep original if rerank fails
-                rerankedResults.push(res);
-            }
+    // 2. Cross-encoder reranking over the candidate pool
+    if (shouldRerank && results.length) {
+        try {
+            const docTexts = results.map((res) =>
+                res.document.meta?.content ? res.document.meta.content.slice(0, 1000) : ""
+            );
+            const scores = await Hive.rerank(queryText, docTexts);
+            const reranked = results.map((res, i) => ({
+                ...res,
+                similarity: scores[i] ?? res.similarity,
+                original_similarity: res.similarity,
+            }));
+            reranked.sort((a, b) => b.similarity - a.similarity);
+            return reranked.slice(0, topK);
+        } catch (err) {
+            console.error("Rerank error:", err.message);
         }
-        
-        // Sort by Cross-Encoder score
-        rerankedResults.sort((a, b) => b.similarity - a.similarity);
-        return rerankedResults.slice(0, topK);
     }
 
     return results.slice(0, topK);
+  }
+
+  /**
+   * Cross-encoder relevance scores for query/document pairs. Uses the
+   * reranker pipeline's tokenizer/model directly so `text_pair` is honored,
+   * and processes pairs in batches.
+   */
+  static async rerank(queryText, docTexts, options = {}) {
+    const pipe = Hive.pipelines.reranker;
+    if (!pipe || !pipe.tokenizer || !pipe.model || !queryText || !docTexts.length) {
+      return docTexts.map(() => null);
+    }
+    const batchSize = Math.max(1, options.batchSize || 8);
+    const maxChars = options.maxChars || 1000;
+    const scores = new Array(docTexts.length).fill(null);
+
+    for (let start = 0; start < docTexts.length; start += batchSize) {
+      const docs = docTexts.slice(start, start + batchSize).map((t) => (t || "").slice(0, maxChars));
+      const queries = new Array(docs.length).fill(queryText);
+      const inputs = pipe.tokenizer(queries, {
+        text_pair: docs,
+        padding: true,
+        truncation: true,
+      });
+      const output = await pipe.model(inputs);
+      const logits = output.logits;
+      const rows = logits.dims[0];
+      const labels = logits.dims.length > 1 ? logits.dims[logits.dims.length - 1] : 1;
+      for (let i = 0; i < rows && i < docs.length; i++) {
+        scores[start + i] = labels > 1
+          ? logits.data[i * labels + (labels - 1)]
+          : logits.data[i];
+      }
+    }
+    return scores;
   }
 
   static cosineSimilarity(queryVector, itemVector, queryVectorMag, itemVectorMag) {
@@ -854,7 +1069,11 @@ class Hive {
     return vector;
   }
 
-  static buildTextEntry(vector, chunk, filePath) {
+  static embeddingText(title, chunk) {
+    return title ? `${title}\n${chunk}` : chunk;
+  }
+
+  static buildTextEntry(vector, chunk, filePath, title = "") {
     const fv = Hive.toFloat32(vector);
     return {
       vector: fv,
@@ -862,7 +1081,7 @@ class Hive {
       meta: {
         content: Hive.escapeChars(chunk),
         href: filePath,
-        title: Hive.escapeChars(chunk.slice(0, 20)),
+        title: Hive.escapeChars(title || chunk.slice(0, 20)),
         filePath,
         type: "text",
       },
@@ -874,7 +1093,7 @@ class Hive {
    * Embed and index many text chunks in batches (one pipeline call per batch
    * instead of one per chunk) — the dominant cost when importing large files.
    */
-  static async addTextChunks(chunks, filePath) {
+  static async addTextChunks(chunks, filePath, title = "") {
     if (!chunks.length) return;
     if (!Hive.pipelines.text) await Hive.initTransformers();
     const collection = Hive.collections.get(Hive.dbName);
@@ -884,8 +1103,9 @@ class Hive {
     for (let i = 0; i < chunks.length; i += batchSize) {
       const batch = chunks.slice(i, i + batchSize);
       let data, dim;
+      const texts = batch.map((chunk) => Hive.embeddingText(title, chunk));
       try {
-        const out = await Hive.pipelines.text(batch, Hive.TransOptions);
+        const out = await Hive.pipelines.text(texts, Hive.TransOptions);
         data = out.data || out;
         if (out.dims && out.dims.length >= 2) {
           dim = out.dims[out.dims.length - 1];
@@ -895,13 +1115,13 @@ class Hive {
       } catch (e) {
         // Fall back to one-by-one if the batch pipeline call fails
         for (const chunk of batch) {
-          const single = await Hive.pipelines.text(chunk, Hive.TransOptions);
-          collection.push(Hive.buildTextEntry(single.data || single, chunk, filePath));
+          const single = await Hive.pipelines.text(Hive.embeddingText(title, chunk), Hive.TransOptions);
+          collection.push(Hive.buildTextEntry(single.data || single, chunk, filePath, title));
         }
         continue;
       }
       for (let b = 0; b < batch.length; b++) {
-        collection.push(Hive.buildTextEntry(data.slice(b * dim, (b + 1) * dim), batch[b], filePath));
+        collection.push(Hive.buildTextEntry(data.slice(b * dim, (b + 1) * dim), batch[b], filePath, title));
       }
     }
   }
@@ -911,16 +1131,17 @@ class Hive {
     return [tokens, tokens.length];
   }
 
-  static async addFile(filePath, filename) {
+  static async addFile(filePath, filename, options = {}) {
     Hive.checkAuth("insert");
+    const save = options.save !== false;
     try {
       const ext = path.extname(filePath).toLowerCase();
       if (Hive.documents.text.includes(ext)) {
-          await Hive.readFile(filePath, "text");
-          await Hive.saveToDisk();
+          await Hive.readFile(filePath, "text", { title: filename || path.basename(filePath) });
+          if (save) await Hive.saveToDisk();
       } else if (Hive.documents.image.includes(ext)) {
           await Hive.addItem("", filePath, "image", filename);
-          await Hive.saveToDisk();
+          if (save) await Hive.saveToDisk();
       }
     } catch (error) {
       console.error("Error adding file:", error);
@@ -1007,9 +1228,10 @@ class Hive {
           input = filePath; 
       }
 
+      const title = path.basename(filePath);
       let result;
       if (type === "text") {
-          result = await Hive.pipelines.text(input, Hive.TransOptions);
+          result = await Hive.pipelines.text(Hive.embeddingText(title, input), Hive.TransOptions);
       } else {
           result = await Hive.pipelines.image(input, Hive.TransOptions);
       }
@@ -1022,7 +1244,7 @@ class Hive {
             filePath, 
             type,
             content: type === "text" ? Hive.escapeChars(input) : `Image: ${path.basename(filePath)}`,
-            title: type === "text" ? Hive.escapeChars(input.slice(0, 20)) : `Image: ${path.basename(filePath)}`,
+            title: type === "text" ? Hive.escapeChars(title) : `Image: ${path.basename(filePath)}`,
             href: filePath
         },
         magnitude: Hive.normalize(vectorData),
@@ -1121,9 +1343,10 @@ class Hive {
     try {
       Hive.log(`Processing: ${path.basename(filePath)}`);
       if (type === "text") {
-        const { text } = await doc2txt.extractTextFromFile(filePath, { fast: true, ...options });
+        const { title, ...extractOptions } = options;
+        const { text } = await doc2txt.extractTextFromFile(filePath, { fast: true, ...extractOptions });
         const chunks = Hive.chunkText(text, filePath);
-        await Hive.addTextChunks(chunks, filePath);
+        await Hive.addTextChunks(chunks, filePath, title || path.basename(filePath));
       } else if (type === "image") {
         await Hive.addItem("", filePath, type);
       }

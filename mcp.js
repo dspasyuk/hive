@@ -88,7 +88,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "hive_find": {
         const results = await Hive.find(args.query, args.topK || 10);
         return ok(results.map(r => ({
-          id: r.document.id, similarity: r.similarity, meta: r.document.meta
+          id: r.document.id, similarity: r.similarity, keywordScore: r.keywordScore ?? null, meta: r.document.meta
         })));
       }
       case "hive_add_file": {

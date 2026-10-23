@@ -7,7 +7,7 @@
     "hive": "admin.js"
   },
   "scripts": {
-    "test": "node tests/msgpack-vector.test.mjs && node tests/hive-batch.test.mjs && node tests/hive-find.test.mjs && node tests/import-folders.test.mjs && node tests/perf-index.mjs",
+    "test": "node tests/msgpack-vector.test.mjs && node tests/hive-batch.test.mjs && node tests/hive-find.test.mjs && node tests/hive-hybrid.test.mjs && node tests/import-folders.test.mjs && node tests/perf-index.mjs",
     "mcp": "node mcp.js",
     "import-folders": "node scripts/import-folders.js",
     "arxiv-bench": "node scripts/arxiv-bench.mjs"

@@ -573,8 +573,8 @@ async function semanticSearch() {
       empty.style.display = 'none';
       body.innerHTML = data.entries.map((e, i) => {
         const preview = e.meta?.content ? e.meta.content.slice(0, 100) : '';
-        const sim = e.similarity != null ? (e.similarity * 100).toFixed(1) + '%' : '';
-        const tag = e._source === 'semantic' ? '<span style="background:#34c759;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">semantic</span>' : e._source === 'clip-image' ? '<span style="background:#ff9f0a;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">CLIP</span>' : '';
+        const sim = e.score != null ? (e.score * 100).toFixed(1) + '%' : (e.similarity != null ? (e.similarity * 100).toFixed(1) + '%' : '');
+        const tag = e._source === 'hybrid' ? '<span style="background:#0071e3;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">hybrid</span>' : e._source === 'semantic' ? '<span style="background:#34c759;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">semantic</span>' : e._source === 'keyword' ? '<span style="background:#8e8e93;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">keyword</span>' : e._source === 'clip-image' ? '<span style="background:#ff9f0a;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px">CLIP</span>' : '';
         return `<tr style="cursor:pointer" onclick="openPreview(${i})">
           <td onclick="event.stopPropagation()"><input type="checkbox" class="entry-checkbox" value="${e.id}" onchange="updateSelected()"></td>
           <td style="font-family:monospace;font-size:11px">${(e.id || '').slice(0, 12)}</td>

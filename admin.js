@@ -336,48 +336,76 @@ app.post('/api/databases/:name/collections', asyncRoute(async (req, res) => {
 app.post('/api/databases/:name/documents', asyncRoute(async (req, res) => {
   const { name } = req.params;
   const username = req.session?.user?.username;
-  if (username) {
-  if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Access denied' });
-    if (!userCanWriteDb(username, name)) return res.status(403).json({ error: 'Write permission denied for this database' });
+  if (username && !userCanWriteDb(username, name)) {
+    return res.status(403).json({ error: 'Write permission denied for this database' });
   }
+  const binPath = path.join(DB_DIR, name, `${name}.bin`);
+  if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
+
   const { data, filename, collection } = req.body;
   if (!data) return res.status(400).json({ error: 'No file data' });
+  const replace = req.body.replace !== false;
   const fname = filename || 'upload.txt';
   const ext = path.extname(fname).toLowerCase();
   const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
   const storeDir = imageExts.includes(ext) ? path.join(process.cwd(), 'img', name) : path.join(process.cwd(), 'docs', name);
   if (!fs.existsSync(storeDir)) fs.mkdirSync(storeDir, { recursive: true });
   const storePath = path.join(storeDir, fname);
-  let suffix = 1;
+  const duplicate = fs.existsSync(storePath);
   let finalPath = storePath;
-  while (fs.existsSync(finalPath)) {
-    const p = path.parse(storePath);
-    finalPath = path.join(p.dir, p.name + '_' + suffix + p.ext);
-    suffix++;
+  if (duplicate && !replace) {
+    let suffix = 1;
+    while (fs.existsSync(finalPath)) {
+      const p = path.parse(storePath);
+      finalPath = path.join(p.dir, p.name + '_' + suffix + p.ext);
+      suffix++;
+    }
   }
-  fs.writeFileSync(finalPath, Buffer.from(data, 'base64'));
-  const binPath = path.join(DB_DIR, name, `${name}.bin`);
-  if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
+  const backupPath = replace && duplicate ? `${storePath}.bak` : null;
   const coll = collection || name;
   try {
+    if (backupPath) {
+      if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      fs.renameSync(finalPath, backupPath);
+    }
+    fs.writeFileSync(finalPath, Buffer.from(data, 'base64'));
+
     const existing = await readEntries(binPath, name);
+    const replaced = replace && existing.some(e => e.meta?.filePath === finalPath);
     Hive.dbName = coll;
     Hive.pathToDB = binPath;
     Hive.logging = false;
     Hive.collections.clear();
     Hive.createCollection(coll);
     const col = Hive.collections.get(coll);
-    for (const e of existing) {
+    const kept = replace ? existing.filter(e => e.meta?.filePath !== finalPath) : existing;
+    for (const e of kept) {
       col.push(e);
     }
-    await withHiveWriteAccess(username, () => Hive.addFile(finalPath, fname));
-    const newEntries = col.slice(existing.length);
-    if (!newEntries.length) return res.status(500).json({ error: 'addFile created no entries' });
+    await withHiveWriteAccess(username, () => Hive.addFile(finalPath, fname, { save: false }));
+    const newEntries = col.slice(kept.length);
+    if (!newEntries.length) throw new Error('addFile created no entries');
     const all = Hive.collections.get(coll) || [];
     await writeEntries(binPath, all);
-    res.json({ message: 'Document added', file: fname, entries: newEntries.length });
+    if (backupPath && fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+    res.json({
+      message: replaced ? 'Document replaced' : 'Document added',
+      file: fname,
+      replaced,
+      entries: newEntries.length
+    });
   } catch (e) {
     console.error('Upload error:', e.message);
+    if (backupPath && fs.existsSync(backupPath)) {
+      try {
+        if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+        fs.renameSync(backupPath, finalPath);
+      } catch (restoreErr) {
+        console.error('Failed to restore previous file:', restoreErr.message);
+      }
+    } else {
+      try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch {}
+    }
     res.status(500).json({ error: e.message });
   } finally {
     if (Hive.saveTimeout) { clearTimeout(Hive.saveTimeout); Hive.saveTimeout = null; }
@@ -439,49 +467,67 @@ app.get('/api/databases/:name/search', asyncRoute(async (req, res) => {
   const binPath = dbBinPath(name);
   if (!fs.existsSync(binPath)) return res.status(404).json({ error: 'Database not found' });
   const index = await Hive.getIndex(binPath, name);
-  const s = q.toLowerCase();
-  const keyword = index.entries.filter(e =>
-    e.collection !== '__hive__' && (
-      (e.meta?.title && e.meta.title.toLowerCase().includes(s)) ||
-      (e.meta?.content && e.meta.content.toLowerCase().includes(s)) ||
-      (e.id && e.id.includes(s))
-    )
-  );
+  const limitK = Math.max(1, Number(limit) || 25);
+  const candidateK = Math.max(limitK * 4, 50);
+  const keyword = Hive.searchKeyword(index, q, candidateK).map(r => ({
+    collection: r.document.collection,
+    id: r.document.id,
+    meta: r.document.meta,
+    keywordScore: r.keywordScore
+  }));
   let semantic = [];
   let clipImageResults = [];
   try {
     const queryVec = await Hive.embed(q, 'text');
-    semantic = Hive.searchVector(index, queryVec, Number(limit)).map(r => ({
+    semantic = Hive.searchVector(index, queryVec, candidateK).map(r => ({
       collection: r.document.collection,
       id: r.document.id,
       meta: r.document.meta,
-      similarity: r.similarity,
-      _source: 'semantic'
+      similarity: r.similarity
     }));
     const imageEntries = index.entries.filter(e => e.vector && e.meta?.type === 'image');
     if (imageEntries.length > 0) {
       const clipVec = await clipTextEmbedding(q);
-      clipImageResults = Hive.searchVector({ entries: imageEntries }, clipVec, Number(limit)).map(r => ({
+      clipImageResults = Hive.searchVector({ entries: imageEntries }, clipVec, candidateK).map(r => ({
         collection: r.document.collection,
         id: r.document.id,
         meta: r.document.meta,
-        similarity: r.similarity,
-        _source: 'clip-image'
+        similarity: r.similarity
       }));
     }
   } catch (e) {
     console.error('Search error:', e.message);
   }
-  const seen = new Set();
-  const merged = [];
-  for (const e of [...semantic, ...clipImageResults, ...keyword]) {
-    if (!seen.has(e.id)) {
-      seen.add(e.id);
-      merged.push({ collection: e.collection, id: e.id, meta: e.meta, similarity: e.similarity ?? null, _source: e._source || 'keyword' });
-    }
-  }
+  const fused = Hive.rrfFuse(
+    [semantic, clipImageResults, keyword],
+    { labels: ['semantic', 'clip-image', 'keyword'] }
+  );
+  const merged = Hive.normalizeRrfScores(fused).map((r) => {
+    const sources = r.sources || [];
+    let source = 'semantic';
+    if (sources.includes('semantic') && sources.includes('keyword')) source = 'hybrid';
+    else if (sources.includes('keyword')) source = 'keyword';
+    else if (sources.includes('clip-image')) source = 'clip-image';
+    return {
+      collection: r.document.collection,
+      id: r.document.id,
+      meta: r.document.meta,
+      similarity: r.similarity ?? null,
+      keywordScore: r.keywordScore ?? null,
+      rrfScore: r.rrfScore,
+      score: r.score,
+      _source: source
+    };
+  });
   const filtered = type ? merged.filter(e => e.meta?.type === type) : merged;
-  res.json({ query: q, total: filtered.length, keyword: keyword.length, semantic: semantic.length, clipImages: clipImageResults.length, entries: filtered.slice(0, Number(limit)) });
+  res.json({
+    query: q,
+    total: filtered.length,
+    keyword: keyword.length,
+    semantic: semantic.length,
+    clipImages: clipImageResults.length,
+    entries: filtered.slice(0, limitK)
+  });
 }));
 
 app.get('/api/databases/:name/users', asyncRoute(async (req, res) => {
@@ -849,29 +895,58 @@ app.post('/api/search', loggedIn, asyncRoute(async (req, res) => {
     return res.status(500).json({ error: 'Failed to embed query: ' + e.message });
   }
 
-  let allResults = [];
+  const semanticAll = [];
+  const keywordAll = [];
   for (const name of dbs) {
     const binPath = dbBinPath(name);
     if (!fs.existsSync(binPath)) continue;
     try {
       const index = await Hive.getIndex(binPath, name);
-      let results;
       if (isImageSearch) {
         const imageEntries = index.entries.filter(e => e.vector && e.meta?.type === 'image');
-        results = Hive.searchVector({ entries: imageEntries }, clipVec, 25);
+        for (const r of Hive.searchVector({ entries: imageEntries }, clipVec, 50)) {
+          semanticAll.push({ document: serializeDoc(r.document, name), similarity: r.similarity });
+        }
       } else {
-        results = Hive.searchVector(index, queryVec, 25);
-      }
-      for (const r of results) {
-        allResults.push({ document: serializeDoc(r.document, name), similarity: r.similarity });
+        for (const r of Hive.searchVector(index, queryVec, 50)) {
+          semanticAll.push({ document: serializeDoc(r.document, name), similarity: r.similarity });
+        }
+        for (const r of Hive.searchKeyword(index, query, 50)) {
+          if (r.document.meta?.type === 'image') continue;
+          keywordAll.push({ document: serializeDoc(r.document, name), keywordScore: r.keywordScore });
+        }
       }
     } catch (e) {
       console.error(`Search error in "${name}":`, e.message);
     }
   }
 
-  allResults.sort((a, b) => b.similarity - a.similarity);
-  allResults = allResults.slice(0, 25);
+  let allResults;
+  if (isImageSearch) {
+    allResults = semanticAll
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, 25)
+      .map((r) => ({ ...r, score: r.similarity }));
+  } else {
+    semanticAll.sort((a, b) => b.similarity - a.similarity);
+    keywordAll.sort((a, b) => b.keywordScore - a.keywordScore);
+    const fused = Hive.rrfFuse(
+      [semanticAll.slice(0, 100), keywordAll.slice(0, 100)],
+      { labels: ['semantic', 'keyword'] }
+    );
+    if (fused.length) {
+      allResults = Hive.normalizeRrfScores(fused.slice(0, 25)).map((r) => ({
+        document: r.document,
+        similarity: r.similarity,
+        keywordScore: r.keywordScore,
+        rrfScore: r.rrfScore,
+        score: r.score,
+        sources: r.sources,
+      }));
+    } else {
+      allResults = semanticAll.slice(0, 25).map((r) => ({ ...r, score: r.similarity }));
+    }
+  }
   res.json(allResults);
 }));
 
@@ -943,7 +1018,7 @@ app.post('/api/databases/text', loggedIn, asyncRoute(async (req, res) => {
     Hive.createCollection(dbName);
     const col = Hive.collections.get(dbName);
     for (const e of existing) col.push(e);
-    await withHiveWriteAccess(username, () => Hive.addFile(filePath, fileName));
+    await withHiveWriteAccess(username, () => Hive.addFile(filePath, title));
     const newEntries = col.slice(existing.length);
     if (!newEntries.length) return res.status(500).json({ error: 'addFile created no entries' });
     const all = Hive.collections.get(dbName) || [];
@@ -1149,9 +1224,10 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!fs.existsSync(binPath)) return mcpErr(`Database "${dbName}" not found`);
         const index = await Hive.getIndex(binPath, dbName);
         const queryVec = await Hive.embed(query, 'text');
-        const results = Hive.searchVector(index, queryVec, topK || 10);
+        const results = Hive.searchHybrid(index, queryVec, query, topK || 10)
+          .filter(r => r.document.meta?.type !== 'image');
         return mcpOk(results.map(r => ({
-          id: r.document.id, similarity: r.similarity, meta: r.document.meta, db: dbName
+          id: r.document.id, similarity: r.similarity, keywordScore: r.keywordScore ?? null, meta: r.document.meta, db: dbName
         })));
       }
       case "hive_add_file": {

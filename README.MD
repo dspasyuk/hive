@@ -115,7 +115,9 @@ Downloads are resumable and rate-limited; documents are stored under `docs/<db>/
 ## Performance & Large Databases
 
 - Databases decode on demand into a read-only **index** (metadata + Float32 vectors), cached by file path and invalidated when the file changes. Counts and search do not re-read the whole `.bin` on every request.
-- Vector search is brute-force cosine with a bounded top-K heap — roughly linear in the number of vectors (about 70-80 ms per 100k 768-dim vectors).
+- Text search is **hybrid**: exact cosine candidates plus a cached BM25 keyword index, fused with Reciprocal Rank Fusion (RRF). Keywords are built lazily on first text search and cached with the index.
+- Exact cosine uses a bounded top-K heap — roughly linear in the number of vectors (about 70-80 ms per 100k 768-dim vectors). BM25 adds ~4 ms per query on a 10k-entry database.
+- Cross-encoder reranking accepts batched query/document pairs; enable with `rerank: true`.
 - Set `HIVE_INDEX_CACHE_BYTES` (default 1 GiB) to bound total index memory.
 - Import embeddings are batched (`Hive.embedBatchSize`, default 32), and PDF image/metadata extraction is skipped for text-only indexing.
 - Past roughly 100k vectors per database, an approximate (ANN) index is the next step.
@@ -126,7 +128,7 @@ Downloads are resumable and rate-limited; documents are stored under `docs/<db>/
 npm test
 ```
 
-Runs the unit/integration suites: vector round-trip, batched chunking, search, folder import, and index cache/scan.
+Runs the unit/integration suites: vector round-trip, batched chunking, search, hybrid BM25/RRF/rerank, folder import, and index cache/scan.
 
 ## API
 
@@ -144,6 +146,10 @@ Runs the unit/integration suites: vector round-trip, batched chunking, search, f
 | `Hive.buildIndex(binPath, collection?)` | Decode a `.bin` into a read-only index |
 | `Hive.getIndex(binPath, collection?)` | Cached index for a `.bin` file (mtime/size invalidated) |
 | `Hive.searchVector(index, queryVector, topK)` | Cosine search over an index |
+| `Hive.searchKeyword(index, query, topK)` | BM25 keyword search (title weighted over content) |
+| `Hive.searchHybrid(index, queryVector, queryText, topK)` | Dense + BM25 candidates fused with RRF |
+| `Hive.rrfFuse(lists, options)` | Fuse ranked lists with Reciprocal Rank Fusion |
+| `Hive.rerank(queryText, docTexts, options)` | Batched cross-encoder relevance scores |
 | `Hive.invalidateIndex(binPath)` | Drop a cached index (call after writing a DB) |
 
 ### `Hive.init(options)`

@@ -58,7 +58,9 @@ const search = {
               groupedResults[docId] = {
                   document: result.document,
                   contexts: [],
-                  maxScore: result.similarity
+                  maxScore: result.similarity ?? null,
+                  maxKeyword: result.keywordScore ?? null,
+                  maxRank: result.score ?? null
               };
           }
 
@@ -68,14 +70,35 @@ const search = {
         }
 
         groupedResults[docId].contexts.push(textContext);
-          if (result.similarity > groupedResults[docId].maxScore) {
+          if (result.similarity != null && (groupedResults[docId].maxScore == null || result.similarity > groupedResults[docId].maxScore)) {
               groupedResults[docId].maxScore = result.similarity;
+          }
+          if (result.keywordScore != null && (groupedResults[docId].maxKeyword == null || result.keywordScore > groupedResults[docId].maxKeyword)) {
+              groupedResults[docId].maxKeyword = result.keywordScore;
+          }
+          if (result.score != null && (groupedResults[docId].maxRank == null || result.score > groupedResults[docId].maxRank)) {
+              groupedResults[docId].maxRank = result.score;
           }
       });
 
       Object.values(groupedResults).forEach((group) => {
-        const similarityScore = group.maxScore ? group.maxScore.toFixed(2) : "N/A";
-        const color = similarityScore > 0.4 ? "green" : "red";
+        const hasRank = group.maxRank != null;
+        const hasSemantic = group.maxScore != null;
+        const hasKeyword = group.maxKeyword != null;
+        const scoreParts = [];
+        if (hasSemantic) scoreParts.push(`semantic ${group.maxScore.toFixed(2)}`);
+        if (hasKeyword) scoreParts.push(`keyword ${group.maxKeyword.toFixed(2)}`);
+        const detail = hasRank && scoreParts.length ? ` (${scoreParts.join(' · ')})` : '';
+        const scoreText = (hasRank ? `Score: ${group.maxRank.toFixed(2)}` : (hasSemantic ? `Score: ${group.maxScore.toFixed(2)}` : (hasKeyword ? `Keyword: ${group.maxKeyword.toFixed(2)}` : 'Score: N/A')))
+          + detail;
+        const color = hasRank
+          ? (group.maxRank >= 0.5 ? "green" : "red")
+          : (hasSemantic ? (group.maxScore > 0.4 ? "green" : "red") : "neutral");
+        const scoreStyle = color === 'green'
+          ? ''
+          : color === 'red'
+            ? `style="color: #f87171; border-color: rgba(239, 68, 68, 0.25); background-color: rgba(239, 68, 68, 0.1);"`
+            : `style="color: #8e8e93; border-color: rgba(142, 142, 147, 0.25); background-color: rgba(142, 142, 147, 0.1);"`;
 
         const cardId = `result-card-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -114,7 +137,7 @@ const search = {
                                   <a target="_blank" href="/api/file?path=${encodeURIComponent(group.document.meta.filePath || group.document.meta.href)}" class="btn btn-custom-grey" style="min-width: 140px;">View Document</a>
                                   ${dbAccess[resultDb] === 'readWrite' ? `<button class="btn btn-danger ms-2" style="min-width: 140px;" onclick="search.deleteDocument('${resultDb}', '${group.document.id}')">Delete Document</button>` : ''}
                               </div>
-                              <div class="similarity-score" ${color !== 'green' ? `style="color: #f87171; border-color: rgba(239, 68, 68, 0.25); background-color: rgba(239, 68, 68, 0.1);"` : ""}>Score: ${similarityScore}</div>
+                              <div class="similarity-score" ${scoreStyle}>${scoreText}</div>
                           </div>
                       </div>
                   </div>
