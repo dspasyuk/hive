@@ -6,6 +6,9 @@
 
 - **Multimodal** — Store text and images in the same database
 - **Semantic Search** — Text-to-text, text-to-image, and image-to-image similarity search
+- **Hybrid retrieval** — Dense cosine candidates combined with BM25 keyword search and fused using Reciprocal Rank Fusion (RRF)
+- **Title-aware chunks** — Every chunk stores the document title and includes it in the embedding input
+- **Replace on re-upload** — Uploading an existing filename replaces the stored file and its indexed chunks
 - **Auto-processing** — Automatically detects file types and generates embeddings
 - **File support** — `.txt`, `.doc`, `.docx`, `.pdf` (text); `.png`, `.jpg`, `.jpeg` (images)
 - **Binary persistence** — On-disk `.bin` with `msgpackr`-serialized for fast startup
@@ -13,7 +16,7 @@
 - **Batched import** — Chunk embeddings are generated in batches for faster bulk ingestion
 - **Configurable chunking** — Configurable `SliceSize`, `overlap`, and `minSliceSize`
 - **File watching** — Watch directories for changes with `chokidar`
-- **Cross-encoder reranking** — Optional reranking pass for improved search quality
+- **Cross-encoder reranking** — Optional batched query/document reranking for improved precision
 - **Per-database access control** — Granular read/readWrite permissions per database
 - **Global user store** — Users persisted in `db/hive_users.json`, survive restarts
 - **MCP Server** — Expose Hive as tools for AI agents (local stdio + remote SSE)
@@ -41,32 +44,42 @@ npm install
 node admin.js
 ```
 
-Open `http://localhost:3030` — login with `admin` / `admin`. Set `PORT` to override the port.
+Open `http://localhost:3030` — login with `admin` / `3030`. Set `PORT` to override the port.
 
 ## Web UI
 
 The admin server provides two interfaces:
 
 ### Client Search UI (`/search`)
-- Full-text and semantic search across databases
+- Hybrid semantic + keyword search across databases
 - Left sidebar with database tree selector
 - Upload files, paste text, search by image
 - Drag-and-drop file upload with progress
-- Result highlighting and similarity scores
+- Re-uploading an existing filename replaces that document
+- Result highlighting, normalized hybrid score, and semantic/keyword score details
 - Per-database access control (users see only their databases)
 
 ### Admin Panel (`/admin`)
 - Database browser — view, create, drop databases
 - Entry explorer — browse entries with type filtering, pagination
-- Semantic search — multi-modal text and image search
+- Hybrid search — multi-modal text and image search
 - User management — create users, set root access, assign per-database read/readWrite permissions
 - Entry preview — inspect metadata, content, vectors, images
 
 ### Login
-- Default credentials: `admin` / `admin`
+- Default credentials: `admin` / `3030`
 - Users are stored in `db/hive_users.json` (survives restarts)
 - Root users see and manage all databases
 - Regular users only see databases they have access to
+
+## Search and Document Handling
+
+- Documents are split into chunks, and every chunk stores the original document title in `meta.title`. The title is also prepended to the chunk before embedding, so title-based semantic and keyword retrieval both work.
+- Text search retrieves dense cosine candidates and BM25 keyword candidates, then fuses the rankings with RRF. BM25 weights title tokens 4× higher than content tokens.
+- Results include a normalized `score` (the top result is `1.0`) plus the underlying `similarity` and `keywordScore` values.
+- Uploading a file whose name already exists replaces the stored file and all indexed chunks for that path. Send `replace: false` to keep the legacy `_1`, `_2` suffix behavior.
+- Replacement is atomic: the previous file is restored if re-indexing fails.
+- Cross-encoder reranking is optional (`rerank: true`) and scores real query/document pairs in batches.
 
 ## Per-Database Permissions
 
@@ -115,9 +128,10 @@ Downloads are resumable and rate-limited; documents are stored under `docs/<db>/
 ## Performance & Large Databases
 
 - Databases decode on demand into a read-only **index** (metadata + Float32 vectors), cached by file path and invalidated when the file changes. Counts and search do not re-read the whole `.bin` on every request.
-- Text search is **hybrid**: exact cosine candidates plus a cached BM25 keyword index, fused with Reciprocal Rank Fusion (RRF). Keywords are built lazily on first text search and cached with the index.
-- Exact cosine uses a bounded top-K heap — roughly linear in the number of vectors (about 70-80 ms per 100k 768-dim vectors). BM25 adds ~4 ms per query on a 10k-entry database.
+- Text search is **hybrid**: exact cosine candidates plus a cached BM25 keyword index, fused with Reciprocal Rank Fusion (RRF). The keyword index is built lazily on the first text search for a database version and cached with the decoded index.
+- Exact cosine uses a bounded top-K heap — roughly linear in the number of vectors (about 70-80 ms per 100k 768-dim vectors). BM25 adds ~4 ms per query on a 10k-entry database; the one-time index build is about 0.8 s for 10k entries.
 - Cross-encoder reranking accepts batched query/document pairs; enable with `rerank: true`.
+- Chunk embeddings include the document title, so existing databases should be rebuilt to adopt title-aware vectors.
 - Set `HIVE_INDEX_CACHE_BYTES` (default 1 GiB) to bound total index memory.
 - Import embeddings are batched (`Hive.embedBatchSize`, default 32), and PDF image/metadata extraction is skipped for text-only indexing.
 - Past roughly 100k vectors per database, an approximate (ANN) index is the next step.
@@ -136,8 +150,8 @@ Runs the unit/integration suites: vector round-trip, batched chunking, search, h
 |--------|-------------|
 | `Hive.init(options)` | Initialize the database |
 | `Hive.embed(input, type)` | Generate a vector embedding |
-| `Hive.find(query, topK)` | Vector similarity search |
-| `Hive.addFile(filePath)` | Add a file (auto-detects text/image) |
+| `Hive.find(query, topK)` | Hybrid search for text queries, exact cosine for vectors |
+| `Hive.addFile(filePath, filename?, options?)` | Add a file; `filename` becomes the title, `{ save: false }` defers persistence |
 | `Hive.removeFile(filePath)` | Remove file entries |
 | `Hive.insertOne(entry)` | Insert a document |
 | `Hive.insertMany(entries)` | Bulk insert |
@@ -149,6 +163,7 @@ Runs the unit/integration suites: vector round-trip, batched chunking, search, h
 | `Hive.searchKeyword(index, query, topK)` | BM25 keyword search (title weighted over content) |
 | `Hive.searchHybrid(index, queryVector, queryText, topK)` | Dense + BM25 candidates fused with RRF |
 | `Hive.rrfFuse(lists, options)` | Fuse ranked lists with Reciprocal Rank Fusion |
+| `Hive.normalizeRrfScores(results)` | Normalize fused RRF scores to `0..1` for display |
 | `Hive.rerank(queryText, docTexts, options)` | Batched cross-encoder relevance scores |
 | `Hive.invalidateIndex(binPath)` | Drop a cached index (call after writing a DB) |
 
@@ -211,7 +226,7 @@ MCP client config:
 
 Remote tools require `username` and `password` parameters (validated against `hive_users.json`):
 
-- `hive_find` — search a database (checks read access)
+- `hive_find` — hybrid search a database (checks read access)
 - `hive_add_file` — upload a file (checks write access)
 - `hive_auth` — verify credentials and list accessible databases
 
